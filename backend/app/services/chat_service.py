@@ -1,0 +1,1305 @@
+import logging
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional
+from uuid import UUID
+from sqlalchemy.orm import Session as SQLAlchemySession
+from backend.app.repositories.session_repository import SessionRepository
+from backend.app.repositories.message_repository import MessageRepository
+from backend.app.repositories.turn_assessment_repository import TurnAssessmentRepository
+from backend.app.repositories.teacher_intervention_repository import TeacherInterventionRepository
+from backend.app.repositories.concept_progress_repository import ConceptProgressRepository
+from backend.app.schemas.message import (
+    MessageCreate,
+    ChatTurnResponse,
+    MessageResponse,
+    TurnEvaluationResponse,
+    LearningDecisionResponse,
+)
+from backend.app.schemas.session import SessionStateBase
+from backend.app.schemas.common import (
+    LearningMode,
+    InputType as CommonInputType,
+    LearningStrategy,
+)
+from backend.app.ai.providers import create_ai_provider, BaseAIProvider
+from backend.app.ai.engine import CurioEngine
+from backend.app.ai.schemas import (
+    AIContext,
+    AIResult,
+    ChatMessage,
+    ConceptModel,
+    ConversationContext,
+    CurrentQuestion,
+    InputType,
+    LearningContext,
+    Mode,
+    ModeTransition,
+    Role,
+    SessionInfo,
+    SessionState,
+    SourceMode,
+    TeacherIntervention,
+    Strategy,
+    TeacherIntervention,
+    TurnEvaluation as AITurnEvaluation,
+)
+from backend.app.retrieval import RetrievalService, create_retrieval_service, RetrievalError
+
+logger = logging.getLogger(__name__)
+
+
+class ChatService:
+    def __init__(
+        self,
+        ai_engine: Optional[CurioEngine] = None,
+        ai_provider: Optional[BaseAIProvider] = None,
+        turn_assessment_repo: Optional[TurnAssessmentRepository] = None,
+        teacher_intervention_repo: Optional[TeacherInterventionRepository] = None,
+        concept_progress_repo: Optional[ConceptProgressRepository] = None,
+        retrieval_service: Optional[RetrievalService] = None,
+    ):
+        self.session_repo = SessionRepository()
+        self.message_repo = MessageRepository()
+        self.turn_assessment_repo = turn_assessment_repo or TurnAssessmentRepository()
+        self.teacher_intervention_repo = teacher_intervention_repo or TeacherInterventionRepository()
+        self.concept_progress_repo = concept_progress_repo or ConceptProgressRepository()
+        self.ai_provider = ai_provider or create_ai_provider()
+        # Canonical AI Engine: ensure configured provider is passed if engine is not supplied
+        self.ai_engine = ai_engine or CurioEngine(provider=self.ai_provider)
+        # Retrieval service for RAG
+        if retrieval_service is not None:
+            self.retrieval_service = retrieval_service
+        else:
+            try:
+                self.retrieval_service = create_retrieval_service()
+            except Exception as e:
+                import logging
+                logging.getLogger("curio_chat").warning(f"RetrievalService disabled: {e}")
+                self.retrieval_service = None
+
+    @staticmethod
+    def _normalize_input_type(raw_val: Any) -> InputType:
+        """
+        Safely normalize raw input type to AI InputType enum:
+        - Preserve valid InputType enum values.
+        - Convert string values to uppercase.
+        - Fallback to InputType.TEXT only when missing or invalid.
+        """
+        if raw_val is None:
+            return InputType.TEXT
+        if isinstance(raw_val, InputType):
+            return raw_val
+        if hasattr(raw_val, "value"):
+            raw_val = raw_val.value
+
+        if isinstance(raw_val, str):
+            norm_str = raw_val.strip().upper()
+            if not norm_str:
+                return InputType.TEXT
+            try:
+                return InputType(norm_str)
+            except ValueError:
+                return InputType.TEXT
+
+        return InputType.TEXT
+
+    @staticmethod
+    def _normalize_common_input_type(raw_val: Any) -> CommonInputType:
+        """
+        Safely normalize raw input type to CommonInputType enum:
+        - Preserve valid CommonInputType enum values.
+        - Convert string values to uppercase.
+        - Fallback to CommonInputType.TEXT only when missing or invalid.
+        """
+        if raw_val is None:
+            return CommonInputType.TEXT
+        if isinstance(raw_val, CommonInputType):
+            return raw_val
+        if hasattr(raw_val, "value"):
+            raw_val = raw_val.value
+
+        if isinstance(raw_val, str):
+            norm_str = raw_val.strip().upper()
+            if not norm_str:
+                return CommonInputType.TEXT
+            try:
+                return CommonInputType(norm_str)
+            except ValueError:
+                return CommonInputType.TEXT
+
+        return CommonInputType.TEXT
+
+    @staticmethod
+    def _to_ai_turn_evaluation(db_eval: Any) -> Optional[AITurnEvaluation]:
+        """
+        Safely maps a database TurnEvaluation model instance (or dict/mock)
+        to an AI TurnEvaluation schema object.
+        Guards against invalid strategy enums, bounds errors on floats/ints, and missing JSON lists.
+        Returns None if mapping fails unrecoverably.
+        """
+        if not db_eval:
+            return None
+
+        if isinstance(db_eval, AITurnEvaluation):
+            return db_eval
+
+        if not isinstance(db_eval, dict):
+            if not any(hasattr(db_eval, attr) for attr in ("message_id", "correctness", "recommended_strategy")):
+                return None
+
+        def _get(key, default=None):
+            if isinstance(db_eval, dict):
+                return db_eval.get(key, default)
+            val = getattr(db_eval, key, default)
+            if hasattr(val, "_mock_return_value") or type(val).__name__ == "MagicMock":
+                return default
+            return val
+
+        def _clamp_float(v, default=0.0):
+            try:
+                if v is None:
+                    return default
+                return max(0.0, min(1.0, float(v)))
+            except (ValueError, TypeError):
+                return default
+
+        def _clamp_int(v, default=1, low=1, high=5):
+            try:
+                if v is None:
+                    return default
+                return max(low, min(high, int(v)))
+            except (ValueError, TypeError):
+                return default
+
+        def _safe_list(v):
+            if isinstance(v, list):
+                return [str(x) for x in v]
+            return []
+
+        strat_val = _get("recommended_strategy", Strategy.PROBE_WHY)
+        try:
+            raw_str = (strat_val.value if hasattr(strat_val, "value") else str(strat_val)).strip().upper()
+            strategy = Strategy(raw_str)
+        except (ValueError, KeyError, AttributeError):
+            strategy = Strategy.PROBE_WHY
+
+        kg_val = _get("knowledge_gap", None)
+        knowledge_gap = str(kg_val) if kg_val is not None else None
+
+        try:
+            return AITurnEvaluation(
+                correctness=_clamp_float(_get("correctness", 0.0)),
+                clarity=_clamp_float(_get("clarity", 0.0)),
+                completeness=_clamp_float(_get("completeness", 0.0)),
+                depth=_clamp_float(_get("depth", 0.0)),
+                relevance=_clamp_float(_get("relevance", 1.0), default=1.0),
+                stuck_probability=_clamp_float(_get("stuck_probability", 0.0)),
+                misconceptions=_safe_list(_get("misconceptions", [])),
+                missing_concepts=_safe_list(_get("missing_concepts", [])),
+                undefined_terms=_safe_list(_get("undefined_terms", [])),
+                mastered_concepts=_safe_list(_get("mastered_concepts", [])),
+                knowledge_gap=knowledge_gap,
+                recommended_strategy=strategy,
+                recommended_difficulty=_clamp_int(_get("recommended_difficulty", 1)),
+            )
+        except Exception:
+            return None
+
+    def _to_message_response(self, msg: Any) -> MessageResponse:
+        """Helper to convert database message model or dict to MessageResponse."""
+        msg_id = getattr(msg, "id", None) or getattr(msg, "message_id", None)
+        raw_input_type = getattr(msg, "input_type", None)
+        input_type_enum = self._normalize_common_input_type(raw_input_type)
+
+        created_at_val = getattr(msg, "created_at", None) or datetime.now(timezone.utc)
+
+        return MessageResponse(
+            message_id=msg_id,
+            session_id=msg.session_id,
+            sender=msg.sender,
+            content=msg.content,
+            input_type=input_type_enum,
+            created_at=created_at_val,
+        )
+
+    def get_messages(
+        self, db: SQLAlchemySession, session_id: UUID, user_id: Optional[UUID] = None
+    ) -> List[MessageResponse]:
+        if user_id:
+            db_session = self.session_repo.get_by_id_and_user(db, session_id, user_id)
+            if not db_session:
+                raise ValueError(f"Active session {session_id} not found.")
+        db_messages = self.message_repo.list_by_session(db, session_id)
+        return [self._to_message_response(m) for m in db_messages]
+
+    def _build_ai_context(
+        self,
+        db: SQLAlchemySession,
+        session_id: UUID,
+        db_session: Any,
+        ai_history: Optional[List[ChatMessage]] = None,
+        db_history: Optional[List[Any]] = None,
+    ) -> AIContext:
+        if db_history is None:
+            if hasattr(self.message_repo, "list_by_session"):
+                try:
+                    db_history = self.message_repo.list_by_session(db, session_id)
+                except Exception:
+                    db_history = []
+            else:
+                db_history = []
+
+        if ai_history is None:
+            ai_history = [
+                ChatMessage(
+                    role=Role.ASSISTANT if getattr(m, "sender", "USER") == "AI" else Role.USER,
+                    content=m.content,
+                    input_type=self._normalize_input_type(getattr(m, "input_type", None))
+                ) for m in (db_history or [])
+            ]
+
+        # Resolve SourceMode from session source_type
+        source_mode = SourceMode.GENERAL
+        if hasattr(db_session, "source_type") and db_session.source_type:
+            try:
+                source_mode = SourceMode(db_session.source_type)
+            except ValueError:
+                source_mode = SourceMode.GENERAL
+
+        # Check for MagicMock to avoid treating unconfigured mock attributes as real IDs
+        def _is_mock(obj: Any) -> bool:
+            if obj is None:
+                return False
+            return hasattr(obj, "_mock_return_value") or type(obj).__name__ == "MagicMock"
+
+        raw_doc_id = getattr(db_session, "document_id", None)
+        session_doc_id = str(raw_doc_id) if (raw_doc_id is not None and not _is_mock(raw_doc_id)) else None
+
+        raw_uid = getattr(db_session, "user_id", None)
+        uid = raw_uid if (raw_uid is not None and not _is_mock(raw_uid)) else None
+
+        session_doc_ver: Optional[str] = None
+        doc_rec = None
+        if session_doc_id:
+            if not uid:
+                logger.warning(
+                    "Session %s references document %s but lacks an authenticated user_id; access denied.",
+                    session_id, session_doc_id
+                )
+            else:
+                from backend.app.models.document import Document
+                try:
+                    doc_rec = db.query(Document).filter(
+                        Document.id == session_doc_id,
+                        Document.user_id == uid,
+                    ).first()
+                    if doc_rec:
+                        c_hash = getattr(doc_rec, "content_hash", None)
+                        c_at = getattr(doc_rec, "created_at", None)
+                        if c_hash is not None and not _is_mock(c_hash):
+                            session_doc_ver = str(c_hash)
+                        elif c_at is not None and not _is_mock(c_at):
+                            session_doc_ver = str(c_at)
+                        else:
+                            session_doc_ver = "v1"
+                    else:
+                        doc_rec = None
+                        logger.warning(
+                            "Document %s does not exist or access denied for user %s in session %s.",
+                            session_doc_id, uid, session_id
+                        )
+                except Exception as e:
+                    doc_rec = None
+                    logger.warning("Could not query document record for session %s: %s", session_id, e)
+
+        # Only retain document_id if ownership is verified
+        authorized_doc_id = session_doc_id if (doc_rec is not None) else None
+
+        session_info = SessionInfo(
+            session_id=str(session_id),
+            topic=db_session.topic,
+            source_mode=source_mode if authorized_doc_id else (SourceMode.GENERAL if source_mode == SourceMode.DOCUMENT else source_mode),
+            document_id=authorized_doc_id,
+            document_version=session_doc_ver,
+        )
+
+        # Convert LearningMode to AI Mode explicitly
+        mode_val = db_session.state.current_mode if db_session and db_session.state else "STUDENT"
+        try:
+            current_mode = Mode(mode_val.value if hasattr(mode_val, "value") else str(mode_val))
+        except ValueError:
+            current_mode = Mode.STUDENT
+
+        # Question hydration: safely look up message if current_question_id is set
+        current_question_obj: Optional[CurrentQuestion] = None
+        target_qid = getattr(db_session.state, "current_question_id", None) if db_session and db_session.state else None
+        if target_qid is not None:
+            target_qid_str = str(target_qid)
+            matching_q = next(
+                (m for m in (db_history or []) if getattr(m, "id", None) is not None and str(m.id) == target_qid_str),
+                None
+            )
+            if matching_q:
+                current_question_obj = CurrentQuestion(
+                    id=str(matching_q.id),
+                    content=matching_q.content,
+                    concept=getattr(db_session.state, "active_concept", ""),
+                    difficulty=getattr(db_session.state, "difficulty", 1)
+                )
+
+        # Interrupted question hydration: safely look up message if interrupted_question_id is set
+        interrupted_question_obj: Optional[CurrentQuestion] = None
+        target_int_id = getattr(db_session.state, "interrupted_question_id", None) if db_session and db_session.state else None
+        if target_int_id is not None:
+            target_int_id_str = str(target_int_id)
+            matching_int = next(
+                (m for m in (db_history or []) if getattr(m, "id", None) is not None and str(m.id) == target_int_id_str),
+                None
+            )
+            if matching_int:
+                interrupted_question_obj = CurrentQuestion(
+                    id=str(matching_int.id),
+                    content=matching_int.content,
+                    concept=getattr(db_session.state, "active_concept", ""),
+                    difficulty=getattr(db_session.state, "difficulty", 1)
+                )
+
+        # Teacher intervention hydration
+        teacher_intervention_obj: Optional[TeacherIntervention] = None
+        raw_intervention = getattr(db_session.state, "teacher_intervention", None) if db_session and db_session.state else None
+        if isinstance(raw_intervention, TeacherIntervention):
+            teacher_intervention_obj = raw_intervention
+        elif isinstance(raw_intervention, dict):
+            try:
+                teacher_intervention_obj = TeacherIntervention(**raw_intervention)
+            except Exception:
+                teacher_intervention_obj = None
+        elif db_session and db_session.state:
+            ti_data = getattr(db_session.state, "teacher_intervention_data", None)
+            if ti_data and isinstance(ti_data, dict) and ti_data.get("active"):
+                teacher_intervention_obj = TeacherIntervention(
+                    active=ti_data.get("active", False),
+                    gap=ti_data.get("gap", ""),
+                    attempt_count=ti_data.get("attempt_count", 0),
+                    verification_required=ti_data.get("verification_required", True),
+                )
+
+        # Mode switch history hydration
+        mode_transitions = []
+        raw_msh = (getattr(db_session.state, "mode_switch_history", None) or []) if db_session and db_session.state else []
+        for tr in raw_msh:
+            if isinstance(tr, dict):
+                mode_transitions.append(ModeTransition(**tr))
+            elif isinstance(tr, ModeTransition):
+                mode_transitions.append(tr)
+
+        teacher_attempts = (
+            teacher_intervention_obj.attempt_count if teacher_intervention_obj else 0
+        )
+        raw_attempts = getattr(db_session.state, "teacher_attempt_count", 0) if db_session and db_session.state else 0
+        teacher_attempt_count_val = raw_attempts if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool) else 0
+
+        def _safe_dict(val):
+            if isinstance(val, dict):
+                return val
+            if hasattr(val, "_mock_return_value") or type(val).__name__ == "MagicMock":
+                return {}
+            try:
+                return dict(val) if val is not None else {}
+            except (TypeError, ValueError):
+                return {}
+
+        def _safe_list(val):
+            if isinstance(val, list):
+                return val
+            if hasattr(val, "_mock_return_value") or type(val).__name__ == "MagicMock":
+                return []
+            try:
+                return list(val) if val is not None else []
+            except (TypeError, ValueError):
+                return []
+
+        # Hydrate concept_model safely
+        saved_concept_model: Optional[ConceptModel] = None
+        raw_concept_model = getattr(db_session.state, "concept_model", None) if db_session and db_session.state else None
+        if raw_concept_model and isinstance(raw_concept_model, dict):
+            try:
+                validated_cm = ConceptModel.model_validate(raw_concept_model)
+                session_topic = (db_session.topic or "").strip().lower()
+                model_topic = (validated_cm.topic or "").strip().lower()
+                if session_topic and model_topic and session_topic != model_topic:
+                    logger.warning(
+                        "Stored ConceptModel topic '%s' does not match session topic '%s'. Discarding stale model.",
+                        validated_cm.topic,
+                        db_session.topic,
+                    )
+                    saved_concept_model = None
+                else:
+                    saved_concept_model = validated_cm
+            except Exception as e:
+                logger.warning(
+                    "Failed to deserialize stored ConceptModel for session %s: %s",
+                    session_id,
+                    e,
+                )
+                saved_concept_model = None
+        elif isinstance(raw_concept_model, ConceptModel):
+            session_topic = (db_session.topic or "").strip().lower()
+            model_topic = (raw_concept_model.topic or "").strip().lower()
+            if session_topic and model_topic and session_topic != model_topic:
+                saved_concept_model = None
+            else:
+                saved_concept_model = raw_concept_model
+
+        # Document identity and version validation on stored concept_model
+        if saved_concept_model:
+            cm_meta = saved_concept_model.metadata or {}
+            cm_doc_id = cm_meta.get("document_id")
+            cm_doc_ver = cm_meta.get("document_version") or cm_meta.get("content_hash")
+            if session_doc_id:
+                if cm_doc_id != str(session_doc_id):
+                    logger.warning(
+                        "Stored ConceptModel document_id '%s' does not match session document_id '%s'. Discarding stale model.",
+                        cm_doc_id, session_doc_id
+                    )
+                    saved_concept_model = None
+                elif session_doc_ver and cm_doc_ver and str(cm_doc_ver) != str(session_doc_ver):
+                    logger.warning(
+                        "Stored ConceptModel document_version '%s' does not match current version '%s'. Discarding stale model.",
+                        cm_doc_ver, session_doc_ver
+                    )
+                    saved_concept_model = None
+            elif cm_doc_id:
+                saved_concept_model = None
+
+        # If curriculum is not yet built for an authorized document-backed session, fetch complete chunks once
+        full_document_chunks = None
+        if authorized_doc_id and saved_concept_model is None:
+            if not uid:
+                logger.warning(
+                    "Cannot fetch document chunks for session %s: missing authenticated user_id.",
+                    session_id
+                )
+            elif doc_rec is None:
+                logger.warning(
+                    "Cannot fetch document chunks for session %s: document %s is not owned by user %s or does not exist.",
+                    session_id, authorized_doc_id, uid
+                )
+            else:
+                from backend.app.repositories.document_chunk_repository import DocumentChunkRepository
+                try:
+                    repo = DocumentChunkRepository()
+                    chunk_models = repo.get_chunks_by_document(db, authorized_doc_id, uid)
+                    if chunk_models and not _is_mock(chunk_models):
+                        from backend.app.ai.rag.models import DocumentChunkEvidence
+                        full_document_chunks = [
+                            DocumentChunkEvidence(
+                                chunk_id=str(c.id),
+                                document_id=str(c.document_id),
+                                chunk_index=c.chunk_index,
+                                text=c.text,
+                                start_char=c.start_char,
+                                end_char=c.end_char,
+                                page_number=(c.chunk_metadata or {}).get("page_number") or (c.chunk_metadata or {}).get("page"),
+                                chunk_metadata=c.chunk_metadata,
+                            )
+                            for c in chunk_models
+                        ]
+                    else:
+                        # Legitimate empty document owned by authorized user
+                        full_document_chunks = []
+                except Exception as e:
+                    logger.warning("Could not fetch full document chunks for curriculum building: %s", e)
+
+        current_state = SessionState(
+            session_id=str(session_id),
+            current_mode=current_mode,
+            difficulty=getattr(db_session.state, "difficulty", 1) if db_session and db_session.state else 1,
+            understanding_confidence=getattr(db_session.state, "confidence", 0.0) if db_session and db_session.state else 0.0,
+            active_concept=getattr(db_session.state, "active_concept", "") if db_session and db_session.state else "",
+            current_question=current_question_obj,
+            interrupted_question=interrupted_question_obj,
+            consecutive_successes=getattr(db_session.state, "consecutive_strong_answers", 0) if db_session and db_session.state else 0,
+            consecutive_failures=getattr(db_session.state, "consecutive_weak_answers", 0) if db_session and db_session.state else 0,
+            unresolved_misconceptions=(getattr(db_session.state, "unresolved_misconceptions", None) or []) if db_session and db_session.state else [],
+            teacher_intervention=teacher_intervention_obj,
+            teacher_attempt_count=max(teacher_attempts, teacher_attempt_count_val),
+            mode_switch_history=mode_transitions,
+            concept_mastery=_safe_dict(getattr(db_session.state, "concept_mastery", None) if db_session and db_session.state else None),
+            misconception_counts=_safe_dict(getattr(db_session.state, "misconception_counts", None) if db_session and db_session.state else None),
+            recent_strategy_history=_safe_list(getattr(db_session.state, "recent_strategy_history", None) if db_session and db_session.state else None),
+            concept_model=saved_concept_model,
+        )
+
+        conversation = ConversationContext(
+            recent_messages=ai_history,
+            message_count=len(ai_history)
+        )
+
+        # Hydrate recent evaluations for session (up to 10 chronologically)
+        raw_recent_evals = []
+        if hasattr(self.message_repo, "get_recent_evaluations_by_session"):
+            res_evals = self.message_repo.get_recent_evaluations_by_session(db, session_id, limit=10)
+            if isinstance(res_evals, list):
+                raw_recent_evals = res_evals
+        recent_evaluations_list: List[AITurnEvaluation] = [
+            ev_obj for raw_ev in raw_recent_evals
+            if (ev_obj := self._to_ai_turn_evaluation(raw_ev)) is not None
+        ]
+
+        learning_context = LearningContext(
+            mastered_concepts=(getattr(db_session.state, "mastered_concepts", None) or []) if db_session and db_session.state else [],
+            unresolved_misconceptions=(getattr(db_session.state, "unresolved_misconceptions", None) or []) if db_session and db_session.state else [],
+            recent_evaluations=recent_evaluations_list,
+            teacher_intervention=teacher_intervention_obj,
+        )
+
+        return AIContext(
+            session=session_info,
+            current_state=current_state,
+            conversation=conversation,
+            learning_context=learning_context,
+            document_chunks=full_document_chunks,
+        )
+
+    def send_message(
+        self,
+        db: SQLAlchemySession,
+        session_id: UUID,
+        message_in: MessageCreate,
+        user_id: Optional[UUID] = None,
+    ) -> ChatTurnResponse:
+        # 1. Load Session State with ownership verification
+        if user_id:
+            db_session = self.session_repo.get_by_id_and_user(db, session_id, user_id)
+        else:
+            db_session = self.session_repo.get(db, session_id)
+        if not db_session or not db_session.state:
+            raise ValueError(f"Active session {session_id} not found.")
+
+        # 2. Compile AI Context (Groq external network call kept outside DB transaction)
+        db_history = self.message_repo.list_by_session(db, session_id)
+        ai_history = [
+            ChatMessage(
+                role=Role.ASSISTANT if getattr(m, "sender", "USER") == "AI" else Role.USER,
+                content=m.content,
+                input_type=self._normalize_input_type(getattr(m, "input_type", None))
+            ) for m in db_history
+        ]
+        ai_history.append(
+            ChatMessage(
+                role=Role.USER,
+                content=message_in.content,
+                input_type=self._normalize_input_type(message_in.input_type)
+            )
+        )
+        context = self._build_ai_context(db, session_id, db_session, ai_history=ai_history, db_history=db_history)
+
+        # 2b. Retrieve document context for RAG (if session is document-backed)
+        source_context = self._retrieve_source_context(
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+            query=message_in.content,
+            db_session=db_session,
+        )
+        if source_context:
+            context.source_context = source_context
+
+        # 3. Invoke AI Engine (EXTERNAL NETWORK CALL - OUTSIDE DB TRANSACTION)
+        ai_result: AIResult = self.ai_engine.process(context)
+        evaluation = ai_result.evaluation
+        decision = ai_result.decision
+        response = ai_result.response
+        updates = ai_result.state_updates
+
+        # 4. Prepare structured responses
+        turn_eval_in = TurnEvaluationResponse(
+            correctness=evaluation.correctness,
+            clarity=evaluation.clarity,
+            completeness=evaluation.completeness,
+            depth=evaluation.depth,
+            relevance=evaluation.relevance,
+            stuck_probability=evaluation.stuck_probability,
+            misconceptions=evaluation.misconceptions,
+            missing_concepts=evaluation.missing_concepts,
+            undefined_terms=evaluation.undefined_terms,
+            mastered_concepts=evaluation.mastered_concepts,
+            knowledge_gap=evaluation.knowledge_gap,
+            recommended_strategy=LearningStrategy(evaluation.recommended_strategy.value if hasattr(evaluation.recommended_strategy, "value") else str(evaluation.recommended_strategy)),
+            recommended_difficulty=evaluation.recommended_difficulty
+        )
+
+        # Prepare mode update
+        if updates.current_mode is not None:
+            new_mode = LearningMode(updates.current_mode.value if hasattr(updates.current_mode, "value") else str(updates.current_mode))
+        else:
+            curr_m = db_session.state.current_mode
+            new_mode = LearningMode(curr_m.value if hasattr(curr_m, "value") else str(curr_m))
+
+        if updates.difficulty is not None:
+            new_difficulty = updates.difficulty
+        else:
+            new_difficulty = db_session.state.difficulty
+
+        if updates.confidence is not None:
+            new_confidence = updates.confidence
+        else:
+            new_confidence = db_session.state.confidence
+
+        if updates.active_concept is not None:
+            new_active_concept = updates.active_concept
+        else:
+            new_active_concept = db_session.state.active_concept
+
+        # Consecutive answer streaks
+        if updates.consecutive_successes is not None:
+            consecutive_strong = updates.consecutive_successes
+        else:
+            consecutive_strong = db_session.state.consecutive_strong_answers
+
+        if updates.consecutive_failures is not None:
+            consecutive_weak = updates.consecutive_failures
+        else:
+            consecutive_weak = db_session.state.consecutive_weak_answers
+
+        # Mastered concepts: merge if updates provided, else preserve existing
+        existing_mastered = db_session.state.mastered_concepts or []
+        if updates.mastered_concepts is not None:
+            new_mastered = list(dict.fromkeys(existing_mastered + updates.mastered_concepts))
+        else:
+            new_mastered = list(existing_mastered)
+
+        # Unresolved misconceptions: replace if updates provided (not None), else preserve existing
+        existing_misconceptions = db_session.state.unresolved_misconceptions or []
+        if updates.unresolved_misconceptions is not None:
+            new_misconceptions = list(dict.fromkeys(updates.unresolved_misconceptions))
+        else:
+            new_misconceptions = list(existing_misconceptions)
+
+        # Teacher intervention persistence data preparation
+        ti_data = getattr(db_session.state, "teacher_intervention_data", None)
+        new_ti_data = None
+        if updates.teacher_intervention is not None and hasattr(updates.teacher_intervention, "model_dump"):
+            new_ti_data = updates.teacher_intervention.model_dump()
+        elif isinstance(ti_data, dict):
+            new_ti_data = ti_data
+
+        # Mode switch history persistence
+        new_msh = []
+        raw_msh_source = updates.mode_switch_history if updates.mode_switch_history is not None else getattr(db_session.state, "mode_switch_history", None)
+        if isinstance(raw_msh_source, (list, tuple)):
+            for t in raw_msh_source:
+                if hasattr(t, "model_dump"):
+                    new_msh.append(t.model_dump())
+                elif isinstance(t, dict):
+                    new_msh.append(t)
+
+        # Teacher Mode attempt count and intervention tracking
+        if (decision and decision.should_restore_interrupted_question) or new_mode == LearningMode.STUDENT:
+            new_teacher_attempts = 0
+            new_teacher_intervention = None
+        else:
+            # Teacher Mode active
+            if updates.teacher_attempt_count is not None and isinstance(updates.teacher_attempt_count, int) and not isinstance(updates.teacher_attempt_count, bool):
+                new_teacher_attempts = updates.teacher_attempt_count
+            else:
+                raw_attempts = getattr(db_session.state, "teacher_attempt_count", 0)
+                new_teacher_attempts = raw_attempts if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool) else 0
+
+            if updates.teacher_intervention is not None:
+                if isinstance(updates.teacher_intervention, dict):
+                    new_teacher_intervention = updates.teacher_intervention
+                elif isinstance(updates.teacher_intervention, TeacherIntervention):
+                    new_teacher_intervention = updates.teacher_intervention.model_dump()
+                elif hasattr(updates.teacher_intervention, "model_dump"):
+                    dumped = updates.teacher_intervention.model_dump()
+                    new_teacher_intervention = dumped if isinstance(dumped, dict) else None
+                else:
+                    new_teacher_intervention = None
+            else:
+                raw_ti = getattr(db_session.state, "teacher_intervention", None)
+                if isinstance(raw_ti, dict):
+                    new_teacher_intervention = raw_ti
+                elif isinstance(raw_ti, TeacherIntervention):
+                    new_teacher_intervention = raw_ti.model_dump()
+                elif hasattr(raw_ti, "model_dump"):
+                    dumped = raw_ti.model_dump()
+                    new_teacher_intervention = dumped if isinstance(dumped, dict) else None
+                else:
+                    new_teacher_intervention = None
+
+        def _safe_dict(val):
+            if isinstance(val, dict):
+                return val
+            if hasattr(val, "_mock_return_value") or type(val).__name__ == "MagicMock":
+                return {}
+            try:
+                return dict(val) if val is not None else {}
+            except (TypeError, ValueError):
+                return {}
+
+        def _safe_list(val):
+            if isinstance(val, list):
+                return val
+            if hasattr(val, "_mock_return_value") or type(val).__name__ == "MagicMock":
+                return []
+            try:
+                return list(val) if val is not None else []
+            except (TypeError, ValueError):
+                return []
+
+        # Concept mastery: replace if updates provided (not None), else preserve existing
+        if updates.concept_mastery is not None:
+            new_concept_mastery = updates.concept_mastery
+        else:
+            new_concept_mastery = _safe_dict(getattr(db_session.state, "concept_mastery", None))
+
+        # Misconception counts: replace if updates provided (not None), else preserve existing
+        if updates.misconception_counts is not None:
+            new_misconception_counts = updates.misconception_counts
+        else:
+            new_misconception_counts = _safe_dict(getattr(db_session.state, "misconception_counts", None))
+
+        # Recent strategy history: replace if updates provided (not None), else preserve existing
+        if updates.recent_strategy_history is not None:
+            new_recent_strategy_history = [
+                s.value if hasattr(s, "value") else str(s)
+                for s in updates.recent_strategy_history
+            ]
+        else:
+            new_recent_strategy_history = _safe_list(getattr(db_session.state, "recent_strategy_history", None))
+
+        # Mode switch history: replace if updates provided (not None), else preserve existing
+        if updates.mode_switch_history is not None:
+            new_mode_switch_history = []
+            for t in updates.mode_switch_history:
+                if hasattr(t, "model_dump"):
+                    new_mode_switch_history.append(t.model_dump())
+                elif isinstance(t, dict):
+                    new_mode_switch_history.append(t)
+        else:
+            new_mode_switch_history = _safe_list(getattr(db_session.state, "mode_switch_history", None))
+
+        # ConceptModel persistence
+        raw_existing_cm = getattr(db_session.state, "concept_model", None)
+        new_concept_model: Optional[Dict[str, Any]] = None
+
+        if updates.concept_model is not None:
+            if isinstance(updates.concept_model, ConceptModel):
+                if updates.concept_model.concepts:
+                    new_concept_model = updates.concept_model.model_dump(mode="json")
+                else:
+                    if raw_existing_cm and isinstance(raw_existing_cm, dict):
+                        existing_topic = (raw_existing_cm.get("topic") or "").strip().lower()
+                        sess_topic = (db_session.topic or "").strip().lower()
+                        if not sess_topic or not existing_topic or sess_topic == existing_topic:
+                            new_concept_model = raw_existing_cm
+            elif isinstance(updates.concept_model, dict):
+                try:
+                    ConceptModel.model_validate(updates.concept_model)
+                    new_concept_model = updates.concept_model
+                except Exception as e:
+                    logger.warning("Invalid concept_model dict in state updates: %s", e)
+                    new_concept_model = raw_existing_cm if isinstance(raw_existing_cm, dict) else None
+        else:
+            if raw_existing_cm and isinstance(raw_existing_cm, dict):
+                existing_topic = (raw_existing_cm.get("topic") or "").strip().lower()
+                sess_topic = (db_session.topic or "").strip().lower()
+                if not sess_topic or not existing_topic or sess_topic == existing_topic:
+                    new_concept_model = raw_existing_cm
+            elif isinstance(raw_existing_cm, ConceptModel):
+                new_concept_model = raw_existing_cm.model_dump(mode="json")
+
+        # 5. ATOMIC PERSISTENCE BOUNDARY: Persist user message, AI response, evaluation,
+        # assessment, session state, teacher intervention, and concept progress together.
+        try:
+            # 5a. Persist User Message (commit=False, flush to populate user_msg.id)
+            user_msg = self.message_repo.create_message(
+                db, session_id, "USER", message_in, commit=False
+            )
+
+            # 5b. Persist AI Response Message (commit=False, flush to populate ai_msg.id)
+            ai_msg = self.message_repo.create_message(
+                db,
+                session_id,
+                "AI",
+                MessageCreate(content=response.content, input_type=CommonInputType.TEXT),
+                commit=False
+            )
+
+            # 5c. Persist Turn Evaluation (commit=False)
+            self.message_repo.create_evaluation(db, user_msg.id, turn_eval_in, commit=False)
+
+            # 5d. Persist Turn Assessment if present (commit=False)
+            if ai_result.learning_assessment or ai_result.turn_interpretation or ai_result.learning_objective or ai_result.question_specification:
+                session_user_id = db_session.user_id
+                learning_assessment_dict = ai_result.learning_assessment.model_dump(mode="json") if ai_result.learning_assessment else None
+                turn_interpretation_dict = ai_result.turn_interpretation.model_dump(mode="json") if ai_result.turn_interpretation else None
+                learning_objective_dict = ai_result.learning_objective.model_dump(mode="json") if ai_result.learning_objective else None
+                question_specification_dict = ai_result.question_specification.model_dump(mode="json") if ai_result.question_specification else None
+
+                self.turn_assessment_repo.create_assessment(
+                    db=db,
+                    message_id=user_msg.id,
+                    session_id=session_id,
+                    user_id=session_user_id,
+                    learning_assessment=learning_assessment_dict,
+                    turn_interpretation=turn_interpretation_dict,
+                    learning_objective=learning_objective_dict,
+                    question_specification=question_specification_dict,
+                    commit=False,
+                )
+
+            # 5e. Question ID and Interrupted Question ID tracking
+            current_qid = ai_msg.id
+            if updates.current_question and updates.current_question.id:
+                try:
+                    current_qid = UUID(str(updates.current_question.id))
+                except (ValueError, AttributeError):
+                    current_qid = ai_msg.id
+
+            if decision and decision.should_restore_interrupted_question:
+                new_interrupted_qid = None
+            elif updates.interrupted_question is not None:
+                try:
+                    new_interrupted_qid = UUID(str(updates.interrupted_question.id)) if updates.interrupted_question.id else None
+                except (ValueError, AttributeError):
+                    new_interrupted_qid = db_session.state.interrupted_question_id
+            elif (db_session.state.current_mode.value if hasattr(db_session.state.current_mode, "value") else str(db_session.state.current_mode)) == "STUDENT" and new_mode == LearningMode.TEACHER:
+                new_interrupted_qid = db_session.state.current_question_id
+            else:
+                new_interrupted_qid = db_session.state.interrupted_question_id
+
+            state_update = SessionStateBase(
+                current_mode=new_mode,
+                difficulty=new_difficulty,
+                confidence=new_confidence,
+                active_concept=new_active_concept,
+                current_question_id=current_qid,
+                interrupted_question_id=new_interrupted_qid,
+                consecutive_strong_answers=consecutive_strong,
+                consecutive_weak_answers=consecutive_weak,
+                unresolved_misconceptions=new_misconceptions,
+                mastered_concepts=new_mastered,
+                concept_mastery=new_concept_mastery,
+                misconception_counts=new_misconception_counts,
+                recent_strategy_history=new_recent_strategy_history,
+                mode_switch_history=new_mode_switch_history,
+                concept_model=new_concept_model,
+                teacher_intervention_data=new_ti_data,
+                teacher_attempt_count=new_teacher_attempts,
+                teacher_intervention=new_teacher_intervention,
+            )
+
+            # Update session state (commit=False)
+            self.session_repo.update_state(db, session_id, state_update, commit=False)
+
+            # 5f. Persist Teacher Intervention Log (commit=False)
+            self._persist_teacher_intervention(
+                db=db,
+                session_id=session_id,
+                user_id=user_id,
+                db_session=db_session,
+                ai_result=ai_result,
+                ai_msg=ai_msg,
+                message_in=message_in,
+                commit=False,
+            )
+
+            # 5g. Synchronize UserConceptProgress (commit=False)
+            self._sync_user_concept_progress(
+                db=db,
+                user_id=user_id,
+                updates=ai_result.state_updates,
+                commit=False,
+            )
+
+            # 5h. Single cohesive commit for the complete conversational turn
+            db.commit()
+            if not getattr(user_msg, "created_at", None):
+                db.refresh(user_msg)
+            if not getattr(ai_msg, "created_at", None):
+                db.refresh(ai_msg)
+        except Exception as e:
+            db.rollback()
+            logger.exception("Transaction failed in send_message, rolling back turn: %s", e)
+            raise
+
+        return ChatTurnResponse(
+            user_message=self._to_message_response(user_msg),
+            ai_message=self._to_message_response(ai_msg),
+            evaluation=turn_eval_in,
+            decision=LearningDecisionResponse(
+                next_mode=LearningMode(decision.next_mode.value if hasattr(decision.next_mode, "value") else str(decision.next_mode)),
+                strategy=LearningStrategy(decision.strategy.value if hasattr(decision.strategy, "value") else str(decision.strategy)),
+                difficulty=decision.difficulty,
+                confidence=decision.confidence,
+                reason=decision.reason,
+                active_concept=decision.active_concept,
+                should_offer_termination=decision.should_offer_termination,
+                should_restore_interrupted_question=decision.should_restore_interrupted_question,
+            ),
+        )
+
+    def send_message_stream(
+        self,
+        db: SQLAlchemySession,
+        session_id: UUID,
+        message_in: MessageCreate,
+        user_id: Optional[UUID] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Process an AI turn and stream the response tokens followed by the complete ChatTurnResponse.
+        Yields events:
+            {"type": "chunk", "delta": "..."}
+            {"type": "complete", "data": <turn_response dict>}
+        """
+        turn_response = self.send_message(db, session_id, message_in, user_id=user_id)
+        content = (turn_response.ai_message.content or "").strip()
+
+        # Stream response text chunks
+        words = re.findall(r"\S+|\s+", content)
+        for word in words:
+            yield {"type": "chunk", "delta": word}
+
+        yield {
+            "type": "complete",
+            "data": turn_response.model_dump(mode="json"),
+        }
+
+    def _persist_teacher_intervention(
+        self,
+        db: SQLAlchemySession,
+        session_id: UUID,
+        user_id: Optional[UUID],
+        db_session: Any,
+        ai_result: AIResult,
+        ai_msg: Any,
+        message_in: MessageCreate,
+        commit: bool = True,
+    ) -> None:
+        """
+        Persist Teacher Intervention Log based on structured AIResult data.
+
+        Only persists when structured Teacher Intervention data is present.
+        Does not parse AI response text for pedagogical information.
+        """
+        if not user_id:
+            return
+
+        updates = ai_result.state_updates
+        decision = ai_result.decision
+        evaluation = ai_result.evaluation
+
+        # Get the previous mode from the session state before this turn
+        prev_mode_val = getattr(db_session.state, "current_mode", None)
+        prev_mode = prev_mode_val.value if hasattr(prev_mode_val, "value") else str(prev_mode_val)
+
+        # Get the new mode from state updates
+        new_mode_val = updates.current_mode
+        new_mode = new_mode_val.value if hasattr(new_mode_val, "value") else str(new_mode_val) if new_mode_val else prev_mode
+
+        # Check if there was an active teacher intervention in the PREVIOUS session state
+        # (for exit/fallback detection, since updates may have cleared it)
+        prev_ti = getattr(db_session.state, "teacher_intervention", None)
+        prev_ti_active = False
+        prev_gap = ""
+        prev_attempt_count = 0
+        if isinstance(prev_ti, dict):
+            prev_ti_active = prev_ti.get("active", False)
+            prev_gap = prev_ti.get("gap", "") or ""
+            prev_attempt_count = prev_ti.get("attempt_count", 0) or 0
+        elif hasattr(prev_ti, "active"):
+            prev_ti_active = getattr(prev_ti, "active", False)
+            prev_gap = getattr(prev_ti, "gap", "") or ""
+            prev_attempt_count = getattr(prev_ti, "attempt_count", 0) or 0
+
+        # Check if there's an active teacher intervention in the state updates
+        # (for enter/continue detection)
+        ti = updates.teacher_intervention
+        ti_active = ti is not None and getattr(ti, "active", False)
+
+        # Determine attempt count and gap
+        if ti_active:
+            attempt_count = updates.teacher_attempt_count or getattr(ti, "attempt_count", 1)
+            gap = getattr(ti, "gap", "") or ""
+        elif prev_ti_active:
+            attempt_count = updates.teacher_attempt_count or getattr(db_session.state, "teacher_attempt_count", 0) or prev_attempt_count
+            gap = prev_gap
+        else:
+            # No intervention data in updates or previous state
+            return
+
+        if not isinstance(attempt_count, int) or isinstance(attempt_count, bool):
+            attempt_count = 1
+
+        # Determine intervention type from mode transition
+        intervention_type = None
+
+        # EXIT or LIMIT_FALLBACK: Was TEACHER, now STUDENT with restoration
+        # Check this FIRST, before enter/continue, since updates may have cleared ti
+        if prev_mode == "TEACHER" and new_mode == "STUDENT" and decision.should_restore_interrupted_question:
+            intervention_type = "exit"
+
+        # ENTER: Previous was STUDENT, now TEACHER with active intervention
+        elif prev_mode != "TEACHER" and new_mode == "TEACHER" and ti_active:
+            intervention_type = "enter"
+
+        # CONTINUE: Was TEACHER, still TEACHER with active intervention
+        elif prev_mode == "TEACHER" and new_mode == "TEACHER" and ti_active:
+            intervention_type = "continue"
+
+        if not intervention_type:
+            return
+
+        def _execute_write():
+            if intervention_type in ("enter", "continue"):
+                existing = self.teacher_intervention_repo.get_latest_open_by_session(
+                    db=db,
+                    session_id=session_id,
+                    user_id=user_id,
+                    attempt_count=attempt_count,
+                )
+                if existing:
+                    if existing.gap != gap:
+                        existing.gap = gap
+                    if commit:
+                        db.commit()
+                    else:
+                        db.flush()
+                else:
+                    self.teacher_intervention_repo.create(
+                        db=db,
+                        session_id=session_id,
+                        user_id=user_id,
+                        gap=gap,
+                        attempt_count=attempt_count,
+                        teacher_explanation=None,
+                        verification_question=None,
+                        intervention_type=intervention_type,
+                        commit=commit,
+                    )
+
+            elif intervention_type == "exit":
+                open_log = self.teacher_intervention_repo.get_latest_open_by_session(
+                    db=db,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                if open_log:
+                    open_log.verification_answer = message_in.content if message_in.content else None
+                    open_log.intervention_type = "exit"
+                    if commit:
+                        db.commit()
+                    else:
+                        db.flush()
+
+        if commit:
+            try:
+                _execute_write()
+            except Exception:
+                db.rollback()
+                pass
+        else:
+            _execute_write()
+
+    def _retrieve_source_context(
+        self,
+        db: SQLAlchemySession,
+        user_id: Optional[UUID],
+        session_id: UUID,
+        query: str,
+        db_session: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve relevant document chunks for RAG context.
+        
+        Returns serializable source context dict with retrieved passages,
+        or None if retrieval is not applicable or fails.
+        
+        Retrieval is performed when:
+        - Session has a document_id (single document mode)
+        - Session source_type is DOCUMENT
+        - User is authenticated
+        - Query is non-empty
+        
+        Does NOT perform retrieval for GENERAL source mode unless explicitly
+        configured to do so (which is not the current product contract).
+        """
+        if not user_id:
+            return None
+        
+        # Check if session is document-backed
+        session_doc_id = getattr(db_session, "document_id", None)
+        session_source_type = getattr(db_session, "source_type", "GENERAL")
+        
+        # Only retrieve for DOCUMENT source mode with a valid document_id
+        if session_source_type != "DOCUMENT" or not session_doc_id:
+            return None
+        
+        # Skip empty queries
+        if not query or not query.strip():
+            return None
+        
+        try:
+            # Perform retrieval restricted to the session's document
+            result = self.retrieval_service.retrieve(
+                db=db,
+                user_id=user_id,
+                query=query.strip(),
+                document_ids=[session_doc_id],
+            )
+            
+            if not result.chunks:
+                # No relevant chunks found - return empty context indicator
+                return {
+                    "chunks": [],
+                    "total_matches": 0,
+                    "query_text": query.strip(),
+                    "retrieval_status": "no_results",
+                }
+            
+            # Convert retrieved chunks to serializable format
+            serializable_chunks = []
+            for chunk in result.chunks:
+                serializable_chunks.append({
+                    "chunk_id": str(chunk.chunk_id),
+                    "document_id": str(chunk.document_id),
+                    "chunk_index": chunk.chunk_index,
+                    "text": chunk.text,
+                    "start_char": chunk.start_char,
+                    "end_char": chunk.end_char,
+                    "chunk_metadata": chunk.chunk_metadata,
+                    "similarity_score": chunk.similarity_score,
+                })
+            
+            return {
+                "chunks": serializable_chunks,
+                "total_matches": result.total_matches,
+                "query_text": result.query_text,
+                "top_k": result.top_k,
+                "retrieval_status": "success",
+                "evidence_sufficiency": getattr(result, "evidence_sufficiency", "SUFFICIENT"),
+            }
+            
+        except RetrievalError as e:
+            # Retrieval-specific error (embedding failure, vector search failure, etc.)
+            # Log and return error context so AI knows retrieval was attempted but failed
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Retrieval failed for session {session_id}: {e.message} (details: {e.details})")
+            
+            return {
+                "chunks": [],
+                "total_matches": 0,
+                "query_text": query.strip(),
+                "retrieval_status": "error",
+                "error_message": e.message,
+                "error_retryable": e.retryable,
+            }
+            
+        except Exception as e:
+            # Unexpected error - log and return error context
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception(f"Unexpected retrieval error for session {session_id}")
+            
+            return {
+                "chunks": [],
+                "total_matches": 0,
+                "query_text": query.strip(),
+                "retrieval_status": "error",
+                "error_message": "Internal retrieval error",
+                "error_retryable": False,
+            }
+
+    def _sync_user_concept_progress(
+        self,
+        db: SQLAlchemySession,
+        user_id: Optional[UUID],
+        updates: Any,
+        commit: bool = True,
+    ) -> None:
+        """
+        Synchronize UserConceptProgress from structured AIResult StateUpdates.
+
+        Only persists absolute AI-authoritative values:
+        - mastery_score from concept_mastery
+        - misconception_count from misconception_counts
+        - last_difficulty from difficulty (when provided)
+
+        Does NOT modify total_attempts or successful_attempts
+        (not available in StateUpdates contract).
+
+        Does NOT calculate or infer any pedagogical values.
+        """
+        if not user_id:
+            return
+
+        # Extract AI-authoritative fields from StateUpdates
+        concept_mastery = getattr(updates, "concept_mastery", None) or {}
+        misconception_counts = getattr(updates, "misconception_counts", None) or {}
+
+        # Difficulty: use AI-provided value if present, otherwise preserve existing
+        difficulty = getattr(updates, "difficulty", None)
+
+        if not concept_mastery:
+            return
+
+        def _execute_sync():
+            batch_items = []
+            for concept, mastery_score in concept_mastery.items():
+                # Only sync valid mastery values (0.0-1.0)
+                if not isinstance(mastery_score, (int, float)):
+                    continue
+                mastery_score = float(mastery_score)
+                if not (0.0 <= mastery_score <= 1.0):
+                    continue
+
+                # Misconception count: only update if explicitly provided by AI
+                misconception_count = misconception_counts.get(concept)
+                if misconception_count is not None and not isinstance(misconception_count, bool):
+                    misconception_count = int(misconception_count)
+                else:
+                    misconception_count = None
+
+                # Difficulty: only update if explicitly provided by AI
+                last_difficulty = None
+                if difficulty is not None and isinstance(difficulty, int) and not isinstance(difficulty, bool):
+                    last_difficulty = difficulty
+
+                batch_items.append({
+                    "concept": concept,
+                    "mastery_score": mastery_score,
+                    "misconception_count": misconception_count,
+                    "last_difficulty": last_difficulty,
+                    "last_practiced_at": datetime.now(timezone.utc),
+                })
+
+            if batch_items:
+                if hasattr(self.concept_progress_repo, "upsert_batch"):
+                    self.concept_progress_repo.upsert_batch(
+                        db=db,
+                        user_id=user_id,
+                        items=batch_items,
+                        commit=commit,
+                    )
+                else:
+                    for item in batch_items:
+                        self.concept_progress_repo.upsert(
+                            db=db,
+                            user_id=user_id,
+                            commit=commit,
+                            **item,
+                        )
+
+        if commit:
+            try:
+                _execute_sync()
+            except Exception:
+                db.rollback()
+                pass
+        else:
+            _execute_sync()

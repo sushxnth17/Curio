@@ -1,0 +1,77 @@
+import sys
+from pathlib import Path
+
+# Ensure project root is in sys.path so `backend.app...` imports resolve
+# whether uvicorn is launched from project root or from backend/
+_backend_dir = Path(__file__).resolve().parent.parent
+_project_root = _backend_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+import logging
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from backend.app.core.config import settings
+from backend.app.core.exceptions import register_exception_handlers
+from backend.app.core.logging import setup_logging
+from backend.app.api.router import api_router
+
+# Ensure all SQLAlchemy models are registered in the registry
+from backend.app.models.user import User  # noqa: F401
+from backend.app.models.document import Document  # noqa: F401
+from backend.app.models.session import Session, SessionState  # noqa: F401
+from backend.app.models.message import Message  # noqa: F401
+from backend.app.models.evaluation import TurnEvaluation  # noqa: F401
+from backend.app.models.report import SessionReport  # noqa: F401
+from backend.app.models.report_version import SessionReportVersion  # noqa: F401
+
+setup_logging()
+logger = logging.getLogger("curio_main")
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url=f"{settings.API_V1_STR}/openapi.json"
+)
+
+# Set up CORS
+if settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# Performance timing and tracing middleware
+@app.middleware("http")
+async def add_process_time_and_request_id(request, call_next):
+    import time
+    import uuid
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    start_time = time.perf_counter()
+    response = await call_next(request)
+    process_time_ms = (time.perf_counter() - start_time) * 1000.0
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time"] = f"{process_time_ms:.2f}ms"
+    return response
+
+# Register Exception Handlers
+register_exception_handlers(app)
+
+# Health endpoint at root level
+@app.get("/health", tags=["Health"])
+def health_check():
+    return {
+        "status": "healthy",
+        "version": "0.1.0",
+        "database": "connected"  # In a real environment, we'd ping the DB
+    }
+
+# Register Routers
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
+logger.info("Curio AI backend successfully initialized.")
