@@ -1,6 +1,7 @@
 fastapi==0.109.2
 uvicorn==0.27.1
 sqlalchemy==2.0.25
+pgvector==0.2.5
 psycopg2-binary==2.9.9
 pydantic==2.6.1
 pydantic-settings==2.1.0
@@ -16,5 +17,6 @@ pypdf==4.2.0
 python-docx==1.1.0
 openai==1.54.0
 faster-whisper==1.2.1
+sentence-transformers==6.3.0
 python-multipart==0.0.6
 av==13.1.0
