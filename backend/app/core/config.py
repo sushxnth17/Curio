@@ -1,0 +1,210 @@
+import os
+from pathlib import Path
+from typing import List, Union
+from pydantic import AnyHttpUrl, validator
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Curio AI"
+    API_V1_STR: str = "/api/v1"
+    
+    # CORS Origins
+    BACKEND_CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:8000",
+    ]
+
+    # Database
+    POSTGRES_SERVER: str = "localhost"
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = "postgres"
+    POSTGRES_DB: str = "curio_db"
+    POSTGRES_PORT: str = "5432"
+    DATABASE_URL: str = ""
+    # Test Database Configuration (Required only for live database integration tests)
+    TEST_DATABASE_URL: str = ""
+
+    # Database Connection Pool Configuration (Conservative sizing for 2-worker / multi-replica stability)
+    DATABASE_POOL_SIZE: int = 5
+    DATABASE_MAX_OVERFLOW: int = 5
+    DATABASE_POOL_TIMEOUT: float = 15.0
+    DATABASE_POOL_RECYCLE: int = 300
+
+    # Primary AI Provider Configuration ("groq", "mock")
+    PRIMARY_AI_PROVIDER: str = "groq"
+
+    # Groq AI Settings
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
+    GROQ_MAX_TOKENS: int = 600
+    GROQ_TIMEOUT_SECONDS: float = 20.0
+    GROQ_MAX_RETRIES: int = 0
+
+    # Authentication & Security
+    SECRET_KEY: str = "curio-dev-secret-key-change-in-production"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+    # Document Storage
+    DOCUMENT_STORAGE_ROOT: str = "./storage"
+    MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100 MB (supports large textbooks and papers)
+    UPLOAD_CHUNK_SIZE: int = 64 * 1024  # 64 KB
+    ALLOWED_DOCUMENT_MIME_TYPES: List[str] = [
+        "application/pdf",
+        "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ]
+    ALLOWED_DOCUMENT_EXTENSIONS: List[str] = [".pdf", ".txt", ".docx"]
+
+    # Chunking Configuration
+    CHUNK_SIZE: int = 1000  # Target chunk size in characters
+    CHUNK_OVERLAP: int = 200  # Overlap between adjacent chunks in characters
+
+    # Embedding Configuration
+    EMBEDDING_PROVIDER: str = "gemini"  # Options: "gemini", "openai"
+    GEMINI_API_KEY: str = ""
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_DIMENSIONS: int = 1536
+    EMBEDDING_API_KEY: str = "curio-dev-mock-key"
+    EMBEDDING_TIMEOUT_SECONDS: float = 30.0
+    EMBEDDING_MAX_RETRIES: int = 2
+    EMBEDDING_BATCH_SIZE: int = 50  # Bounded batch size suitable for Gemini and large PDFs
+
+    # Retrieval Configuration
+    RETRIEVAL_TOP_K: int = 5  # Default number of results to return
+    RETRIEVAL_SIMILARITY_THRESHOLD: float = 0.0  # Minimum cosine similarity (0-1)
+    RETRIEVAL_HYBRID_ENABLED: bool = True  # Combine dense and lexical retrieval via RRF
+    RETRIEVAL_RRF_K: int = 60  # Reciprocal Rank Fusion smoothing constant
+
+    # Voice & Speech-to-Text Configuration
+    VOICE_WHISPER_MODEL: str = "base"
+    VOICE_DEVICE: str = "cpu"
+    VOICE_COMPUTE_TYPE: str = "int8"
+    VOICE_MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB audio max
+    VOICE_MAX_AUDIO_DURATION_SECONDS: float = 300.0  # 5 minutes max
+    VOICE_CONCURRENT_REQUEST_LIMIT: int = 2  # Concurrency throttle for CPU model inference
+    VOICE_ALLOWED_MIME_TYPES: List[str] = [
+        "audio/webm",
+        "audio/ogg",
+        "audio/wav",
+        "audio/wave",
+        "audio/x-wav",
+        "audio/mp3",
+        "audio/mpeg",
+        "audio/m4a",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/flac",
+        "application/octet-stream",
+    ]
+
+    class Config:
+        case_sensitive = True
+        extra = "ignore"
+        env_file = (
+            str(Path(__file__).resolve().parent.parent.parent.parent / ".env"),
+            str(Path(__file__).resolve().parent.parent.parent / ".env"),
+            ".env",
+            "backend/.env",
+        )
+
+
+    def get_database_url(self) -> str:
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    @staticmethod
+    def mask_database_url(url: str) -> str:
+        """
+        Safely mask credentials in a database URL for logging and error reporting.
+        """
+        if not url:
+            return ""
+        try:
+            from sqlalchemy.engine import make_url
+            parsed = make_url(url)
+            return parsed.render_as_string(hide_password=True)
+        except Exception:
+            import re
+            return re.sub(r":([^:@]+)@", r":***@", url)
+
+    def validate_test_database_url(self, url: str) -> str:
+        """
+        Validates that a candidate test database URL is safe to use.
+        Ensures:
+        - URL is non-empty.
+        - URL is not identical to the main application DATABASE_URL.
+        - Database name is distinct from main POSTGRES_DB and system databases.
+        - Database name explicitly contains 'test' (e.g. curio_test_db).
+        - No production keywords appear in host or database name.
+        """
+        if not url or not url.strip():
+            raise RuntimeError(
+                "Dedicated test database is not configured. "
+                "Please set TEST_DATABASE_URL (e.g., postgresql://postgres:postgres@localhost:5432/curio_test_db)."
+            )
+
+        url = url.strip()
+        main_db_url = self.get_database_url().strip()
+        if url == main_db_url:
+            masked = self.mask_database_url(url)
+            raise ValueError(
+                f"Safety violation: TEST_DATABASE_URL ({masked}) is identical to the application DATABASE_URL. "
+                "A dedicated, separate test database is strictly required."
+            )
+
+        try:
+            from sqlalchemy.engine import make_url
+            parsed = make_url(url)
+        except Exception as e:
+            raise ValueError(f"Invalid TEST_DATABASE_URL format: {e}")
+
+        db_name = parsed.database
+        if not db_name:
+            raise ValueError("Safety violation: TEST_DATABASE_URL does not specify a target database name.")
+
+        db_name_lower = db_name.lower()
+        if db_name_lower in ("postgres", "template1"):
+            raise ValueError(
+                f"Safety violation: TEST_DATABASE_URL specifies system database '{db_name}'. "
+                "A dedicated test database (e.g. 'curio_test_db') must be used."
+            )
+
+        if db_name_lower == self.POSTGRES_DB.lower():
+            raise ValueError(
+                f"Safety violation: TEST_DATABASE_URL specifies application database '{self.POSTGRES_DB}'. "
+                "A dedicated test database (e.g. 'curio_test_db') must be used."
+            )
+
+        if "test" not in db_name_lower:
+            raise ValueError(
+                f"Safety violation: TEST_DATABASE_URL database name '{db_name}' does not contain 'test'. "
+                "Database names for testing must contain 'test' (e.g. 'curio_test_db') to prevent accidental data loss."
+            )
+
+        host_lower = (parsed.host or "").lower()
+        for keyword in ("prod", "production", "live"):
+            if keyword in db_name_lower or keyword in host_lower:
+                raise ValueError(
+                    f"Safety violation: TEST_DATABASE_URL contains production keyword '{keyword}'. "
+                    "Integration tests cannot be pointed to production environments."
+                )
+
+        return url
+
+    def get_test_database_url(self) -> str:
+        """
+        Returns the validated TEST_DATABASE_URL.
+        Fails if TEST_DATABASE_URL is not set or violates safety invariants.
+        Never silently falls back to DATABASE_URL.
+        """
+        raw_url = self.TEST_DATABASE_URL or os.getenv("TEST_DATABASE_URL", "")
+        return self.validate_test_database_url(raw_url)
+
+settings = Settings()

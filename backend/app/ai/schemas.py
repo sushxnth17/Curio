@@ -1,0 +1,1194 @@
+from enum import Enum, IntEnum
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from uuid import UUID
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from backend.app.ai.answer_intelligence.schemas import LearningAssessment
+
+
+# =====================================================================
+# ENUMS
+# =====================================================================
+
+class Mode(str, Enum):
+    STUDENT = "STUDENT"
+    TEACHER = "TEACHER"
+    EVALUATOR = "EVALUATOR"
+
+# Backward compatibility alias
+LearningMode = Mode
+
+
+class Difficulty(IntEnum):
+    FOUNDATION = 1
+    MECHANISM = 2
+    APPLICATION = 3
+    EDGE_CASE = 4
+    SYNTHESIS = 5
+
+
+class Strategy(str, Enum):
+    ASK_FOUNDATION = "ASK_FOUNDATION"
+    PROBE_WHY = "PROBE_WHY"
+    PROBE_HOW = "PROBE_HOW"
+    CLARIFY_TERM = "CLARIFY_TERM"
+    PROBE_MISSING_CONCEPT = "PROBE_MISSING_CONCEPT"
+    CHALLENGE_MISCONCEPTION = "CHALLENGE_MISCONCEPTION"
+    INCREASE_DIFFICULTY = "INCREASE_DIFFICULTY"
+    TEACH_GAP = "TEACH_GAP"
+    VERIFY_UNDERSTANDING = "VERIFY_UNDERSTANDING"
+    REQUEST_EXAMPLE = "REQUEST_EXAMPLE"
+    TEST_EDGE_CASE = "TEST_EDGE_CASE"
+    CHALLENGE_ASSUMPTION = "CHALLENGE_ASSUMPTION"
+    CONNECT_CONCEPTS = "CONNECT_CONCEPTS"
+    DEPTH_EXPANSION = "DEPTH_EXPANSION"
+    RESTORE_INTERRUPTED_QUESTION = "RESTORE_INTERRUPTED_QUESTION"
+    OFFER_TERMINATION = "OFFER_TERMINATION"
+    GENERATE_REPORT = "GENERATE_REPORT"
+
+# Backward compatibility alias
+LearningStrategy = Strategy
+
+
+class InputType(str, Enum):
+    TEXT = "TEXT"
+    VOICE = "VOICE"
+
+
+class SourceMode(str, Enum):
+    GENERAL = "GENERAL"
+    DOCUMENT = "DOCUMENT"
+    MIXED = "MIXED"
+
+
+class Role(str, Enum):
+    USER = "USER"
+    ASSISTANT = "ASSISTANT"
+    SYSTEM = "SYSTEM"
+
+
+# =====================================================================
+# CURRENT QUESTION & TEACHER INTERVENTION
+# =====================================================================
+
+class CurrentQuestion(BaseModel):
+    id: str
+    content: str
+    concept: str
+    difficulty: int = Field(ge=1, le=5)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def serialize_id(cls, v: Any) -> str:
+        return str(v)
+
+
+class TeacherIntervention(BaseModel):
+    active: bool = False
+    gap: str = ""
+    attempt_count: int = Field(default=0, ge=0)
+    verification_required: bool = True
+
+
+class ModeTransition(BaseModel):
+    from_mode: Mode
+    to_mode: Mode
+    reason: str
+    timestamp: str
+    active_concept: Optional[str] = None
+
+
+# =====================================================================
+# ADAPTIVE LEARNING CORE CONTRACTS
+# =====================================================================
+
+class TurnIntent(str, Enum):
+    ANSWER_ATTEMPT = "ANSWER_ATTEMPT"
+    CLARIFICATION_REQUEST = "CLARIFICATION_REQUEST"
+    HELP_REQUEST = "HELP_REQUEST"
+    CONCEPTUAL_QUESTION = "CONCEPTUAL_QUESTION"
+    ACKNOWLEDGEMENT = "ACKNOWLEDGEMENT"
+    OFF_TOPIC = "OFF_TOPIC"
+    READY_FOR_VERIFICATION = "READY_FOR_VERIFICATION"
+    UNKNOWN = "UNKNOWN"
+
+
+class TurnInterpretation(BaseModel):
+    intent: TurnIntent = TurnIntent.UNKNOWN
+    is_answer_attempt: bool = False
+    is_question: bool = False
+    is_help_request: bool = False
+    referenced_concept: Optional[str] = None
+    target: Optional[str] = None
+    answer_evidence: Optional[str] = None
+    requested_action: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+# =====================================================================
+# MILESTONE D: CONCEPT MODEL & LEARNING OBJECTIVES ENUMS
+# =====================================================================
+
+class CognitiveAction(str, Enum):
+    """Pedagogical cognitive actions for observable learning objectives."""
+    DEFINE = "DEFINE"
+    EXPLAIN = "EXPLAIN"
+    COMPARE = "COMPARE"
+    APPLY = "APPLY"
+    DERIVE = "DERIVE"
+    ANALYZE = "ANALYZE"
+    PREDICT = "PREDICT"
+    JUSTIFY = "JUSTIFY"
+    EVALUATE = "EVALUATE"
+    SYNTHESIZE = "SYNTHESIZE"
+
+
+class RelationshipType(str, Enum):
+    """Semantic relationship types between concepts."""
+    PREREQUISITE_OF = "PREREQUISITE_OF"
+    DEPENDS_ON = "DEPENDS_ON"
+    PART_OF = "PART_OF"
+    RELATED_TO = "RELATED_TO"
+    CONTRASTS_WITH = "CONTRASTS_WITH"
+    GENERALIZES_TO = "GENERALIZES_TO"
+    SPECIALIZES_TO = "SPECIALIZES_TO"
+    CAUSES = "CAUSES"
+    REQUIRES = "REQUIRES"
+    EXAMPLE_OF = "EXAMPLE_OF"
+
+
+class EvidenceType(str, Enum):
+    """Categorization of expected evidence types demonstrating understanding."""
+    DEFINITION = "DEFINITION"
+    MECHANISM = "MECHANISM"
+    REASONING = "REASONING"
+    EXAMPLE = "EXAMPLE"
+    APPLICATION = "APPLICATION"
+    COMPARISON = "COMPARISON"
+    JUSTIFICATION = "JUSTIFICATION"
+    DERIVATION = "DERIVATION"
+    PREDICTION = "PREDICTION"
+
+
+class ValidationStatus(str, Enum):
+    """Integrity and consistency status of a ConceptModel / TopicModel."""
+    VALID = "VALID"
+    VALID_INCOMPLETE = "VALID_INCOMPLETE"
+    INVALID = "INVALID"
+    NEEDS_REGENERATION = "NEEDS_REGENERATION"
+
+
+class ConstraintType(str, Enum):
+    """Types of rules, invariants, or conditions governing a concept."""
+    INVARIANT = "INVARIANT"
+    PREREQUISITE_CONDITION = "PREREQUISITE_CONDITION"
+    BOUNDARY_LIMIT = "BOUNDARY_LIMIT"
+    ASSUMPTION = "ASSUMPTION"
+
+
+# =====================================================================
+# MILESTONE D: EVIDENCE, OBJECTIVE, AND CONSTRAINT CONTRACTS
+# =====================================================================
+
+class ExpectedEvidenceRequirement(BaseModel):
+    """Essential or supporting evidence requirement for assessing a concept/objective."""
+    evidence_id: str
+    concept_id: str = ""
+    description: str = ""
+    objective_id: Optional[str] = None
+    evidence_type: EvidenceType = EvidenceType.MECHANISM
+    essential: bool = True
+    acceptance_criteria: Optional[str] = None
+    constraints: List[str] = Field(default_factory=list)
+    common_failure_modes: List[str] = Field(default_factory=list)
+
+
+class ConceptConstraint(BaseModel):
+    """A condition, invariant, rule, or limitation that must hold."""
+    constraint_id: str
+    concept_id: str = ""
+    description: str = ""
+    rule: Optional[str] = None
+    constraint_type: ConstraintType = ConstraintType.INVARIANT
+    essential: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_rule_and_desc(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            desc = data.get("description") or data.get("rule") or ""
+            data["description"] = desc
+            if not data.get("rule"):
+                data["rule"] = desc
+        return data
+
+
+class MisconceptionDefinition(BaseModel):
+    """Detailed domain misconception with corrective evidence and causal flaw."""
+    misconception_id: str
+    concept_id: str
+    description: str
+    incorrect_claim_pattern: Optional[str] = None
+    why_it_is_incorrect: Optional[str] = None
+    corrective_evidence: Optional[str] = None
+    related_objective_ids: List[str] = Field(default_factory=list)
+
+
+class ObjectiveType(str, Enum):
+    UNDERSTAND_DEFINITION = "UNDERSTAND_DEFINITION"
+    UNDERSTAND_MECHANISM = "UNDERSTAND_MECHANISM"
+    UNDERSTAND_CAUSAL_RELATION = "UNDERSTAND_CAUSAL_RELATION"
+    EXPLAIN_IN_OWN_WORDS = "EXPLAIN_IN_OWN_WORDS"
+    APPLY_CONCEPT = "APPLY_CONCEPT"
+    DISTINGUISH_CONCEPTS = "DISTINGUISH_CONCEPTS"
+    RESOLVE_MISCONCEPTION = "RESOLVE_MISCONCEPTION"
+    VERIFY_GAP = "VERIFY_GAP"
+    HANDLE_EDGE_CASE = "HANDLE_EDGE_CASE"
+    SYNTHESIZE_CONCEPTS = "SYNTHESIZE_CONCEPTS"
+    INCREASE_DIFFICULTY = "INCREASE_DIFFICULTY"
+    REINFORCE_WEAK_CONCEPT = "REINFORCE_WEAK_CONCEPT"
+
+
+class LearningObjective(BaseModel):
+    """Observable learning objective describing what a learner should demonstrate."""
+    objective_id: str = ""
+    concept_id: str = ""
+    description: str = ""
+    cognitive_action: CognitiveAction = CognitiveAction.EXPLAIN
+    objective_type: ObjectiveType = ObjectiveType.UNDERSTAND_MECHANISM
+    target_concept: str = ""
+    difficulty: int = Field(default=1, ge=1, le=5)
+    essential: bool = True
+    reason: str = ""
+    evidence_expected: str = ""
+    prerequisite_objective_ids: List[str] = Field(default_factory=list)
+    expected_evidence: List[ExpectedEvidenceRequirement] = Field(default_factory=list)
+    success_criteria: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _harmonize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            cid = data.get("concept_id") or data.get("target_concept") or "general_concept"
+            data.setdefault("concept_id", cid)
+            data.setdefault("target_concept", cid)
+
+            desc = data.get("description") or data.get("reason") or f"Demonstrate understanding of {cid}"
+            data.setdefault("description", desc)
+            data.setdefault("reason", desc)
+
+            if not data.get("objective_id"):
+                obj_type = str(data.get("objective_type") or "obj").lower()
+                data["objective_id"] = f"{cid}_{obj_type}"
+
+            if not data.get("cognitive_action"):
+                data["cognitive_action"] = CognitiveAction.EXPLAIN
+            if not data.get("objective_type"):
+                data["objective_type"] = ObjectiveType.UNDERSTAND_MECHANISM
+
+            if not data.get("evidence_expected"):
+                ev_reqs = data.get("expected_evidence") or []
+                if ev_reqs and isinstance(ev_reqs, list) and isinstance(ev_reqs[0], (dict, ExpectedEvidenceRequirement)):
+                    if isinstance(ev_reqs[0], dict):
+                        data["evidence_expected"] = ev_reqs[0].get("description", desc)
+                    else:
+                        data["evidence_expected"] = ev_reqs[0].description
+                else:
+                    data["evidence_expected"] = desc
+        return data
+
+
+class ConceptNode(BaseModel):
+    """Node in the concept graph representing a single unit of understanding."""
+    id: str
+    name: str
+    definition: str = ""
+    importance: str = "CORE"
+    prerequisites: List[str] = Field(default_factory=list)
+    sub_concepts: List[str] = Field(default_factory=list)
+    applications: List[str] = Field(default_factory=list)
+    constraints: List[str] = Field(default_factory=list)
+    common_misconceptions: List[str] = Field(default_factory=list)
+    misconception_definitions: List[MisconceptionDefinition] = Field(default_factory=list)
+    learning_objectives: List[LearningObjective] = Field(default_factory=list)
+    expected_evidence: List[ExpectedEvidenceRequirement] = Field(default_factory=list)
+    concept_constraints: List[ConceptConstraint] = Field(default_factory=list)
+    edge_cases: List[str] = Field(default_factory=list)
+    difficulty_level: int = Field(default=1, ge=1, le=5)
+    generation_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source_references: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConceptRelationship(BaseModel):
+    """Directed relationship edge between two concepts."""
+    source_concept_id: str
+    target_concept_id: str
+    relation_type: str = "PREREQUISITE_OF"
+    description: str = ""
+    evidence_type: str = "EXPLICIT_STATEMENT"  # EXPLICIT_STATEMENT, HEURISTIC_INFERENCE
+    is_explicit: bool = True
+
+
+class ConceptModel(BaseModel):
+    """
+    Top-level validated concept representation for a topic.
+    Serves as TopicModel describing knowledge decomposition, prerequisites, and learning objectives.
+    """
+    model_config = ConfigDict(protected_namespaces=())
+
+    topic: str
+    topic_id: str = ""
+    topic_title: str = ""
+    topic_description: str = ""
+    subject_area: Optional[str] = None
+    learner_level: Optional[str] = None
+    concepts: List[ConceptNode] = Field(default_factory=list)
+    relationships: List[ConceptRelationship] = Field(default_factory=list)
+    learning_objectives: List[LearningObjective] = Field(default_factory=list)
+    validation_status: ValidationStatus = ValidationStatus.VALID
+    limitations: List[str] = Field(default_factory=list)
+    model_version: str = "1.0.0"
+    generation_metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def get_concept(self, concept_id: str) -> Optional[ConceptNode]:
+        cid_norm = (concept_id or "").strip().lower().replace(" ", "_")
+        for c in self.concepts:
+            if c.id == concept_id or c.id.strip().lower().replace(" ", "_") == cid_norm:
+                return c
+            if c.name and (c.name.strip().lower() == (concept_id or "").strip().lower() or c.name.strip().lower().replace(" ", "_") == cid_norm):
+                return c
+        return None
+
+    def has_concept(self, concept_id: str) -> bool:
+        return self.get_concept(concept_id) is not None
+
+    def get_prerequisites(self, concept_id: str) -> List[str]:
+        node = self.get_concept(concept_id)
+        if node:
+            return list(node.prerequisites)
+        return []
+
+    def get_objectives_for_concept(self, concept_id: str) -> List[LearningObjective]:
+        node = self.get_concept(concept_id)
+        if node and node.learning_objectives:
+            return list(node.learning_objectives)
+        cid_norm = (concept_id or "").strip().lower().replace(" ", "_")
+        return [
+            obj for obj in self.learning_objectives
+            if obj.concept_id == concept_id or obj.concept_id.strip().lower().replace(" ", "_") == cid_norm
+        ]
+
+    def get_expected_evidence_for_concept(self, concept_id: str) -> List[ExpectedEvidenceRequirement]:
+        node = self.get_concept(concept_id)
+        if node and node.expected_evidence:
+            return list(node.expected_evidence)
+        # Check from objectives
+        objs = self.get_objectives_for_concept(concept_id)
+        ev_list: List[ExpectedEvidenceRequirement] = []
+        for obj in objs:
+            ev_list.extend(obj.expected_evidence)
+        return ev_list
+
+    def get_essential_objectives(self) -> List[LearningObjective]:
+        all_objs = list(self.learning_objectives)
+        for c in self.concepts:
+            all_objs.extend(c.learning_objectives)
+        # Deduplicate by objective_id
+        seen: Set[str] = set()
+        essential: List[LearningObjective] = []
+        for obj in all_objs:
+            if obj.objective_id not in seen and obj.essential:
+                seen.add(obj.objective_id)
+                essential.append(obj)
+        return essential
+
+    def get_all_prerequisite_edges(self) -> List[tuple]:
+        """Returns directed prerequisite edges as (prerequisite_id, dependent_id)."""
+        edges = []
+        # From node.prerequisites
+        for c in self.concepts:
+            for p in c.prerequisites:
+                edges.append((p, c.id))
+        # From relationships with relation_type == PREREQUISITE_OF
+        for r in self.relationships:
+            if r.relation_type in (RelationshipType.PREREQUISITE_OF.value, "PREREQUISITE_OF", RelationshipType.REQUIRES.value, "REQUIRES"):
+                edge = (r.source_concept_id, r.target_concept_id)
+                if edge not in edges:
+                    edges.append(edge)
+        return edges
+
+
+# Canonical Milestone D Alias: TopicModel is ConceptModel
+TopicModel = ConceptModel
+
+
+class ConceptState(BaseModel):
+    concept_id: str
+    mastery: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_count: int = Field(default=0, ge=0)
+    misconception_count: int = Field(default=0, ge=0)
+    attempt_count: int = Field(default=0, ge=0)
+    last_evaluated: Optional[str] = None
+    recent_scores: List[float] = Field(default_factory=list)
+    unresolved_gap: bool = False
+    active_misconceptions: List[str] = Field(default_factory=list)
+    assessed_objectives: List[str] = Field(default_factory=list)
+    mastered_objectives: List[str] = Field(default_factory=list)
+
+
+class LearnerModel(BaseModel):
+    session_id: str
+    concepts: Dict[str, ConceptState] = Field(default_factory=dict)
+    overall_mastery: float = Field(default=0.0, ge=0.0, le=1.0)
+    recent_performances: List[float] = Field(default_factory=list)
+    unresolved_gaps: List[str] = Field(default_factory=list)
+
+    def get_or_create_concept(self, concept_id: str) -> ConceptState:
+        if concept_id not in self.concepts:
+            self.concepts[concept_id] = ConceptState(concept_id=concept_id)
+        return self.concepts[concept_id]
+
+
+# =====================================================================
+# PHASE 5: TOPIC PLANNING & COMPREHENSIVE CONCEPT COVERAGE
+# =====================================================================
+
+class CoverageStatus(str, Enum):
+    """
+    Distinct pedagogical coverage states for concepts in a TopicPlan.
+    Coverage is decoupled from mastery:
+    - UNASSESSED: No meaningful evaluation evidence exists yet.
+    - IN_PROGRESS: Evidence exists, but understanding is partial, incomplete, or inconsistent.
+    - MASTERED: Demonstrates sufficient evidence meeting established mastery criteria.
+    - NEEDS_REVIEW: Previously explored concept with an active misconception, knowledge gap, or regression.
+    """
+    UNASSESSED = "UNASSESSED"
+    IN_PROGRESS = "IN_PROGRESS"
+    MASTERED = "MASTERED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class ConceptCoverageItem(BaseModel):
+    """
+    Represents an individual concept within the TopicPlan, its importance,
+    dependencies, learning objectives, and current coverage/mastery status.
+    """
+    concept_id: str
+    name: str
+    importance: str = "CORE"  # CORE, PREREQUISITE, ADVANCED, EXTENSION
+    difficulty_level: int = Field(default=1, ge=1, le=5)
+    prerequisites: List[str] = Field(default_factory=list)
+    sub_concepts: List[str] = Field(default_factory=list)
+    learning_objectives: List[LearningObjective] = Field(default_factory=list)
+    status: CoverageStatus = CoverageStatus.UNASSESSED
+    mastery: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_count: int = Field(default=0, ge=0)
+    attempt_count: int = Field(default=0, ge=0)
+    unresolved_gap: bool = False
+    active_misconceptions: List[str] = Field(default_factory=list)
+    assessed_objectives: List[str] = Field(default_factory=list)
+    mastered_objectives: List[str] = Field(default_factory=list)
+    source_references: List[Dict[str, Any]] = Field(default_factory=list)
+    has_source_evidence: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_source_evidence_flag(self) -> Any:
+        if self.metadata.get("is_generic_scaffold", False):
+            self.has_source_evidence = False
+            return self
+        if not self.source_references:
+            self.has_source_evidence = False
+        return self
+
+    @property
+    def coverage_status(self) -> CoverageStatus:
+        return self.status
+
+
+class TopicPlan(BaseModel):
+    """
+    Top-level topic plan representing all concepts required to explore and understand a topic.
+    Provides deterministic querying of unassessed concepts, in-progress concepts,
+    review-needed concepts, and overall topic coverage metrics.
+    """
+    topic: str
+    topic_id: str = ""
+    topic_title: str = ""
+    topic_description: str = ""
+    concepts: List[ConceptCoverageItem] = Field(default_factory=list)
+    validation_status: ValidationStatus = ValidationStatus.VALID
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def coverage_percentage(self) -> float:
+        return round(self.coverage_summary()["coverage_ratio"] * 100.0, 1)
+
+    def get_concept(self, concept_id: str) -> Optional[ConceptCoverageItem]:
+        cid_norm = (concept_id or "").strip().lower().replace(" ", "_")
+        for c in self.concepts:
+            if c.concept_id == concept_id or c.concept_id.strip().lower().replace(" ", "_") == cid_norm:
+                return c
+            if c.name and (c.name.strip().lower() == (concept_id or "").strip().lower() or c.name.strip().lower().replace(" ", "_") == cid_norm):
+                return c
+        return None
+
+    def get_unassessed_concepts(self) -> List[ConceptCoverageItem]:
+        return [c for c in self.concepts if c.status == CoverageStatus.UNASSESSED]
+
+    def get_in_progress_concepts(self) -> List[ConceptCoverageItem]:
+        return [c for c in self.concepts if c.status == CoverageStatus.IN_PROGRESS]
+
+    def get_mastered_concepts(self) -> List[ConceptCoverageItem]:
+        return [c for c in self.concepts if c.status == CoverageStatus.MASTERED]
+
+    def get_review_needed_concepts(self) -> List[ConceptCoverageItem]:
+        return [c for c in self.concepts if c.status == CoverageStatus.NEEDS_REVIEW]
+
+    def get_eligible_concepts(self, min_prereq_mastery: float = 0.50) -> List[ConceptCoverageItem]:
+        mastery_map = {c.concept_id: c.mastery for c in self.concepts}
+        eligible: List[ConceptCoverageItem] = []
+        for c in self.concepts:
+            prereqs_satisfied = True
+            for pid in c.prerequisites:
+                if mastery_map.get(pid, 0.0) < min_prereq_mastery:
+                    prereqs_satisfied = False
+                    break
+            if prereqs_satisfied:
+                eligible.append(c)
+        return eligible
+
+    def coverage_summary(self) -> Dict[str, Any]:
+        total = len(self.concepts)
+        if total == 0:
+            return {
+                "total_concepts": 0,
+                "unassessed_count": 0,
+                "in_progress_count": 0,
+                "mastered_count": 0,
+                "needs_review_count": 0,
+                "coverage_ratio": 0.0,
+                "mastery_ratio": 0.0,
+                "curriculum_coverage": 0.0,
+                "learner_mastery": 0.0,
+                "assessed_mastery_ratio": 0.0,
+                "source_availability_ratio": 0.0,
+                "is_generic_scaffold": bool(self.metadata.get("is_generic_scaffold", False)),
+                "curriculum_type": "GENERIC_SCAFFOLD" if self.metadata.get("is_generic_scaffold", False) else ("DOCUMENT_DERIVED" if self.metadata.get("document_id") else "TOPIC_DERIVED"),
+                "document_id": self.metadata.get("document_id"),
+                "document_version": self.metadata.get("document_version") or self.metadata.get("content_hash"),
+                "ingestion_status": self.metadata.get("ingestion_status", "PROCESSED"),
+            }
+        unassessed = len(self.get_unassessed_concepts())
+        in_progress = len(self.get_in_progress_concepts())
+        mastered = len(self.get_mastered_concepts())
+        needs_review = len(self.get_review_needed_concepts())
+        explored = total - unassessed
+        cov_ratio = round(explored / total, 3)
+        mast_ratio = round(mastered / total, 3)
+        assessed_mast = round(mastered / explored, 3) if explored > 0 else 0.0
+        
+        is_scaffold = bool(self.metadata.get("is_generic_scaffold", False))
+        if is_scaffold:
+            source_ratio = 0.0
+        else:
+            with_evidence = sum(
+                1 for c in self.concepts
+                if getattr(c, "has_source_evidence", False)
+                and bool(getattr(c, "source_references", []))
+                and not bool(getattr(c, "metadata", {}).get("is_generic_scaffold", False))
+            )
+            source_ratio = round(with_evidence / total, 3)
+
+        return {
+            "total_concepts": total,
+            "unassessed_count": unassessed,
+            "in_progress_count": in_progress,
+            "mastered_count": mastered,
+            "needs_review_count": needs_review,
+            "coverage_ratio": cov_ratio,
+            "mastery_ratio": mast_ratio,
+            "curriculum_coverage": cov_ratio,
+            "learner_mastery": mast_ratio,
+            "assessed_mastery_ratio": assessed_mast,
+            "source_availability_ratio": source_ratio,
+            "is_generic_scaffold": is_scaffold,
+            "curriculum_type": "GENERIC_SCAFFOLD" if is_scaffold else ("DOCUMENT_DERIVED" if self.metadata.get("document_id") else "TOPIC_DERIVED"),
+            "document_id": self.metadata.get("document_id"),
+            "document_version": self.metadata.get("document_version") or self.metadata.get("content_hash"),
+            "ingestion_status": self.metadata.get("ingestion_status", "PROCESSED"),
+        }
+
+
+class QuestionSpecification(BaseModel):
+    target_concept: str
+    learning_objective: LearningObjective
+    difficulty: int = Field(ge=1, le=5)
+    reason: str
+    evidence_expected: str
+    generation_constraints: List[str] = Field(default_factory=list)
+    expected_evidence_requirements: List[ExpectedEvidenceRequirement] = Field(default_factory=list)
+    concept_constraints: List[ConceptConstraint] = Field(default_factory=list)
+    prerequisite_context: List[str] = Field(default_factory=list)
+    cognitive_action: Optional[CognitiveAction] = None
+    target_concept_evidence: Optional[str] = None
+    source_references: List[Any] = Field(default_factory=list)
+
+
+class QuestionCandidate(BaseModel):
+    candidate_id: str
+    question_text: str
+    rationale: str = ""
+
+
+class CandidateList(BaseModel):
+    candidates: List[QuestionCandidate] = Field(default_factory=list)
+
+
+class QuestionValidation(BaseModel):
+    candidate_id: str
+    is_valid: bool
+    rejection_reasons: List[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class QuestionSelectionResult(BaseModel):
+    specification: QuestionSpecification
+    candidates: List[QuestionCandidate] = Field(default_factory=list)
+    validations: List[QuestionValidation] = Field(default_factory=list)
+    selected_candidate: Optional[QuestionCandidate] = None
+    selection_reason: str = ""
+    novelty_passed: bool = True
+
+
+# =====================================================================
+# SESSION STATE
+# =====================================================================
+
+class SessionState(BaseModel):
+    session_id: str
+    current_mode: Mode = Mode.STUDENT
+    current_difficulty: int = Field(default=1, ge=1, le=5)
+    understanding_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    active_concept: str = ""
+    current_question: Optional[CurrentQuestion] = None
+    interrupted_question: Optional[CurrentQuestion] = None
+    consecutive_failures: int = Field(default=0, ge=0)
+    consecutive_successes: int = Field(default=0, ge=0)
+    teacher_attempt_count: int = Field(default=0, ge=0)
+    recent_strategy_history: List[Strategy] = Field(default_factory=list)
+    misconception_counts: Dict[str, int] = Field(default_factory=dict)
+    concept_mastery: Dict[str, float] = Field(default_factory=dict)
+    unresolved_misconceptions: List[str] = Field(default_factory=list)
+    teacher_intervention: Optional[TeacherIntervention] = None
+    mode_switch_history: List[ModeTransition] = Field(default_factory=list)
+    concept_model: Optional[ConceptModel] = None
+    learner_model: Optional[LearnerModel] = None
+    current_objective: Optional[LearningObjective] = None
+    latest_interpretation: Optional[TurnInterpretation] = None
+    question_specification: Optional[QuestionSpecification] = None
+    learning_assessment: Optional[LearningAssessment] = None
+    topic_plan: Optional[TopicPlan] = None
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def serialize_session_id(cls, v: Any) -> str:
+        return str(v)
+
+    @field_validator("concept_mastery")
+    @classmethod
+    def validate_concept_mastery(cls, v: Dict[str, float]) -> Dict[str, float]:
+        for concept, score in v.items():
+            if not (0.0 <= score <= 1.0):
+                raise ValueError(f"Mastery score for '{concept}' must be between 0.0 and 1.0, got {score}")
+        return v
+
+
+# =====================================================================
+# TURN EVALUATION
+# =====================================================================
+
+class TurnEvaluation(BaseModel):
+    correctness: float = Field(ge=0.0, le=1.0)
+    clarity: float = Field(ge=0.0, le=1.0)
+    completeness: float = Field(ge=0.0, le=1.0)
+    depth: float = Field(ge=0.0, le=1.0)
+    relevance: float = Field(ge=0.0, le=1.0)
+    stuck_probability: float = Field(ge=0.0, le=1.0)
+    misconceptions: List[str] = Field(default_factory=list)
+    missing_concepts: List[str] = Field(default_factory=list)
+    undefined_terms: List[str] = Field(default_factory=list)
+    mastered_concepts: List[str] = Field(default_factory=list)
+    knowledge_gap: Optional[str] = None
+    recommended_strategy: Strategy
+    recommended_difficulty: int = Field(ge=1, le=5)
+
+
+# =====================================================================
+# LEARNING DECISION
+# =====================================================================
+
+class LearningDecision(BaseModel):
+    next_mode: Mode
+    strategy: Strategy
+    difficulty: int = Field(ge=1, le=5)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+    active_concept: str
+    should_offer_termination: bool = False
+    should_restore_interrupted_question: bool = False
+
+
+# =====================================================================
+# AI RESPONSE
+# =====================================================================
+
+class AIResponse(BaseModel):
+    content: str = Field(min_length=1)
+    mode: Mode
+    strategy: Strategy
+    difficulty: int = Field(ge=1, le=5)
+    confidence: float = Field(ge=0.0, le=1.0)
+    requires_single_question: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# =====================================================================
+# STATE UPDATES
+# =====================================================================
+
+class StateUpdates(BaseModel):
+    active_concept: Optional[str] = None
+    interrupted_question: Optional[CurrentQuestion] = None
+    mastered_concepts: Optional[List[str]] = None
+    unresolved_misconceptions: Optional[List[str]] = None
+    teacher_intervention: Optional[TeacherIntervention] = None
+    current_question: Optional[CurrentQuestion] = None
+    current_mode: Optional[Mode] = None
+    difficulty: Optional[int] = Field(default=None, ge=1, le=5)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    concept_mastery: Optional[Dict[str, float]] = None
+    consecutive_failures: Optional[int] = Field(default=None, ge=0)
+    consecutive_successes: Optional[int] = Field(default=None, ge=0)
+    teacher_attempt_count: Optional[int] = Field(default=None, ge=0)
+    recent_strategy_history: Optional[List[Strategy]] = None
+    misconception_counts: Optional[Dict[str, int]] = None
+    mode_switch_history: Optional[List[ModeTransition]] = None
+    concept_model: Optional[ConceptModel] = None
+    learner_model: Optional[LearnerModel] = None
+    current_objective: Optional[LearningObjective] = None
+    latest_interpretation: Optional[TurnInterpretation] = None
+    question_specification: Optional[QuestionSpecification] = None
+    topic_plan: Optional[TopicPlan] = None
+
+    @field_validator("concept_mastery")
+    @classmethod
+    def validate_update_concept_mastery(cls, v: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+        if v is not None:
+            for concept, score in v.items():
+                if not (0.0 <= score <= 1.0):
+                    raise ValueError(f"Mastery score for '{concept}' must be between 0.0 and 1.0, got {score}")
+        return v
+
+
+# =====================================================================
+# PHASE 3: EVALUATION & REPORT ENUMS
+# =====================================================================
+
+class MasteryLevel(str, Enum):
+    BEGINNER = "BEGINNER"
+    DEVELOPING = "DEVELOPING"
+    PROFICIENT = "PROFICIENT"
+    MASTERY = "MASTERY"
+
+
+class GapStatus(str, Enum):
+    DETECTED = "DETECTED"
+    CHALLENGED = "CHALLENGED"
+    RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+class GapSeverity(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class MisconceptionStatus(str, Enum):
+    DETECTED = "DETECTED"
+    CHALLENGED = "CHALLENGED"
+    RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+# =====================================================================
+# PHASE 3: SESSION EVIDENCE CONTRACTS
+# =====================================================================
+
+class TurnEvidence(BaseModel):
+    turn_index: int = Field(ge=0)
+    question: str
+    learner_answer: str
+    concept: str
+    difficulty: int = Field(ge=1, le=5)
+    evaluation: TurnEvaluation
+
+
+class TeacherInterventionEvidence(BaseModel):
+    intervention_index: int = Field(ge=0)
+    gap: str
+    attempt_count: int = Field(ge=1)
+    teacher_explanation: str
+    verification_question: str
+    verification_answer: Optional[str] = None
+    verification_passed: bool = False
+    related_concept: str = ""
+
+
+class ConceptEvidenceItem(BaseModel):
+    concept: str
+    turns_evaluated: List[int] = Field(default_factory=list)
+    correctness_scores: List[float] = Field(default_factory=list)
+    misconceptions: List[str] = Field(default_factory=list)
+    gaps: List[str] = Field(default_factory=list)
+    teacher_assisted: bool = False
+    highest_difficulty_passed: int = 0
+
+
+class SessionEvidence(BaseModel):
+    session_id: str
+    topic: str
+    turns: List[TurnEvidence] = Field(default_factory=list)
+    teacher_interventions: List[TeacherInterventionEvidence] = Field(default_factory=list)
+    concepts_encountered: List[str] = Field(default_factory=list)
+    concept_evidence_map: Dict[str, ConceptEvidenceItem] = Field(default_factory=dict)
+    difficulty_progression: List[int] = Field(default_factory=list)
+    confidence_progression: List[float] = Field(default_factory=list)
+    total_learner_turns: int = 0
+    successful_turns: int = 0
+    failed_turns: int = 0
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def serialize_session_id(cls, v: Any) -> str:
+        return str(v)
+
+
+# =====================================================================
+# PHASE 3: CONCEPT ASSESSMENT & EVALUATION CONTRACTS
+# =====================================================================
+
+class ConceptAssessment(BaseModel):
+    concept: str
+    understanding_score: float = Field(ge=0.0, le=100.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    mastery_level: MasteryLevel
+    strengths: List[str] = Field(default_factory=list)
+    gaps: List[str] = Field(default_factory=list)
+    misconceptions: List[str] = Field(default_factory=list)
+    evidence_references: List[str] = Field(default_factory=list)
+
+
+class GapAnalysisItem(BaseModel):
+    gap: str
+    concept: str = ""
+    severity: GapSeverity = GapSeverity.MEDIUM
+    status: GapStatus = GapStatus.UNRESOLVED
+    evidence_references: List[str] = Field(default_factory=list)
+
+
+class MisconceptionAnalysisItem(BaseModel):
+    misconception: str
+    concept: str = ""
+    status: MisconceptionStatus = MisconceptionStatus.UNRESOLVED
+    evidence_references: List[str] = Field(default_factory=list)
+
+
+class RoadmapItem(BaseModel):
+    priority: int = Field(ge=1)
+    title: str
+    description: str
+    target_concept: str
+    action_type: str = "PRACTICE"
+
+
+class SessionEvaluation(BaseModel):
+    session_id: str
+    topic: str
+    understanding_score: float = Field(ge=0.0, le=100.0)
+    mastery_level: MasteryLevel
+    evidence_confidence: float = Field(ge=0.0, le=1.0)
+    strengths: List[str] = Field(default_factory=list)
+    knowledge_gaps: List[GapAnalysisItem] = Field(default_factory=list)
+    misconceptions: List[MisconceptionAnalysisItem] = Field(default_factory=list)
+    resolved_gaps: List[str] = Field(default_factory=list)
+    unresolved_gaps: List[str] = Field(default_factory=list)
+    resolved_misconceptions: List[str] = Field(default_factory=list)
+    unresolved_misconceptions: List[str] = Field(default_factory=list)
+    concept_assessments: List[ConceptAssessment] = Field(default_factory=list)
+    difficulty_progression: List[int] = Field(default_factory=list)
+    teacher_intervention_summary: Dict[str, Any] = Field(default_factory=dict)
+    recommended_next_steps: List[RoadmapItem] = Field(default_factory=list)
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def serialize_session_id(cls, v: Any) -> str:
+        return str(v)
+
+
+class LearningReport(BaseModel):
+    session_id: str
+    topic: str
+    understanding_score: float = Field(ge=0.0, le=100.0)
+    mastery_level: MasteryLevel
+    evidence_confidence: float = Field(ge=0.0, le=1.0)
+    strengths: List[str] = Field(default_factory=list)
+    knowledge_gaps: List[str] = Field(default_factory=list)
+    resolved_gaps: List[str] = Field(default_factory=list)
+    unresolved_gaps: List[str] = Field(default_factory=list)
+    misconceptions: List[str] = Field(default_factory=list)
+    resolved_misconceptions: List[str] = Field(default_factory=list)
+    unresolved_misconceptions: List[str] = Field(default_factory=list)
+    concept_assessments: List[ConceptAssessment] = Field(default_factory=list)
+    difficulty_achieved: int = Field(default=1, ge=1, le=5)
+    teacher_interventions_required: int = Field(default=0, ge=0)
+    recommended_next_steps: List[RoadmapItem] = Field(default_factory=list)
+    created_at: Optional[str] = None
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def serialize_session_id(cls, v: Any) -> str:
+        return str(v)
+
+
+# =====================================================================
+# AI RESULT
+# =====================================================================
+
+class AIResult(BaseModel):
+    evaluation: TurnEvaluation
+    decision: LearningDecision
+    response: AIResponse
+    state_updates: StateUpdates
+    session_evaluation: Optional[SessionEvaluation] = None
+    learning_report: Optional[LearningReport] = None
+    turn_interpretation: Optional[TurnInterpretation] = None
+    learning_objective: Optional[LearningObjective] = None
+    question_specification: Optional[QuestionSpecification] = None
+    concept_model: Optional[ConceptModel] = None
+    learner_model: Optional[LearnerModel] = None
+    learning_assessment: Optional[LearningAssessment] = None
+    topic_plan: Optional[TopicPlan] = None
+
+
+# =====================================================================
+# CONVERSATION MESSAGE
+# =====================================================================
+
+class ChatMessage(BaseModel):
+    role: Role = Role.USER
+    content: str
+    input_type: InputType = InputType.TEXT
+
+    def __init__(self, **data: Any):
+        # Support legacy 'sender' argument: sender="USER" | "AI"
+        if "sender" in data and "role" not in data:
+            sender = str(data.pop("sender")).upper()
+            if sender == "AI":
+                data["role"] = Role.ASSISTANT
+            elif sender == "SYSTEM":
+                data["role"] = Role.SYSTEM
+            else:
+                data["role"] = Role.USER
+        super().__init__(**data)
+
+    @property
+    def sender(self) -> str:
+        """Backward compatibility for legacy code expecting `message.sender`."""
+        if self.role == Role.ASSISTANT:
+            return "AI"
+        return self.role.value
+
+
+# =====================================================================
+# AI CONTEXT
+# =====================================================================
+
+class SessionInfo(BaseModel):
+    session_id: str
+    topic: str
+    source_mode: SourceMode = SourceMode.GENERAL
+    document_id: Optional[str] = None
+    document_version: Optional[str] = None
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def serialize_session_id(cls, v: Any) -> str:
+        return str(v)
+
+
+class ConversationContext(BaseModel):
+    recent_messages: List[ChatMessage] = Field(default_factory=list)
+    message_count: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_message_count(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            messages = data.get("recent_messages", [])
+            if "message_count" not in data or data["message_count"] == 0:
+                data["message_count"] = len(messages)
+        return data
+
+
+class LearningContext(BaseModel):
+    mastered_concepts: List[str] = Field(default_factory=list)
+    unresolved_misconceptions: List[str] = Field(default_factory=list)
+    recent_evaluations: List[TurnEvaluation] = Field(default_factory=list)
+    teacher_intervention: Optional[TeacherIntervention] = None
+
+
+class AIContext(BaseModel):
+    session: SessionInfo
+    current_state: SessionState
+    conversation: ConversationContext
+    learning_context: LearningContext = Field(default_factory=LearningContext)
+    source_context: Optional[Dict[str, Any]] = None
+    document_chunks: Optional[List[Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def adapt_legacy_or_flat_inputs(cls, data: Any) -> Any:
+        """
+        Allows AIContext to be constructed either via nested sub-models:
+            AIContext(session=..., current_state=..., conversation=..., learning_context=...)
+        or via flat legacy parameters:
+            AIContext(session_id=..., topic=..., current_mode=..., difficulty=..., active_concept=..., history=...)
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # If already provided with nested structures, return as-is
+        if "session" in data and "current_state" in data and "conversation" in data:
+            return data
+
+        # Adapt flat parameters
+        session_id = str(data.get("session_id", "default_session"))
+        topic = data.get("topic", "General Topic")
+        source_mode = data.get("source_mode", SourceMode.GENERAL)
+
+        document_id = data.get("document_id")
+        document_version = data.get("document_version")
+        session_info = SessionInfo(
+            session_id=session_id,
+            topic=topic,
+            source_mode=source_mode,
+            document_id=str(document_id) if document_id else None,
+            document_version=str(document_version) if document_version else None,
+        )
+
+        current_mode = data.get("current_mode", Mode.STUDENT)
+        difficulty = data.get("difficulty", 1)
+        active_concept = data.get("active_concept", "")
+
+        curr_q = data.get("current_question")
+        if isinstance(curr_q, str):
+            curr_q = CurrentQuestion(id="curr_q", content=curr_q, concept=active_concept, difficulty=difficulty)
+
+        interrupted_q = data.get("interrupted_question")
+        if isinstance(interrupted_q, str):
+            interrupted_q = CurrentQuestion(id="int_q", content=interrupted_q, concept=active_concept, difficulty=difficulty)
+
+        teacher_int = data.get("teacher_intervention")
+
+        current_state = data.get("current_state")
+        if not current_state:
+            current_state = SessionState(
+                session_id=session_id,
+                current_mode=current_mode,
+                current_difficulty=difficulty,
+                active_concept=active_concept,
+                current_question=curr_q,
+                interrupted_question=interrupted_q,
+                teacher_intervention=teacher_int,
+                recent_strategy_history=data.get("recent_strategy_history", []),
+                misconception_counts=data.get("misconception_counts", {}),
+            )
+
+        raw_history = data.get("history", data.get("recent_messages", data.get("messages", [])))
+        messages: List[ChatMessage] = []
+        for item in raw_history:
+            if isinstance(item, ChatMessage):
+                messages.append(item)
+            elif isinstance(item, dict):
+                messages.append(ChatMessage(**item))
+            elif hasattr(item, "sender") and hasattr(item, "content"):
+                messages.append(ChatMessage(sender=item.sender, content=item.content))
+
+        conversation = ConversationContext(
+            recent_messages=messages,
+            message_count=len(messages)
+        )
+
+        learning_context = data.get("learning_context", LearningContext())
+        source_context = data.get("source_context", None)
+        document_chunks = data.get("document_chunks", None)
+
+        return {
+            "session": session_info,
+            "current_state": current_state,
+            "conversation": conversation,
+            "learning_context": learning_context,
+            "source_context": source_context,
+            "document_chunks": document_chunks,
+        }
+
+    # Backward compatibility accessors
+    @property
+    def session_id(self) -> str:
+        return self.session.session_id
+
+    @property
+    def topic(self) -> str:
+        return self.session.topic
+
+    @property
+    def current_mode(self) -> Mode:
+        return self.current_state.current_mode
+
+    @property
+    def difficulty(self) -> int:
+        return self.current_state.current_difficulty
+
+    @property
+    def active_concept(self) -> str:
+        return self.current_state.active_concept
+
+    @property
+    def history(self) -> List[ChatMessage]:
+        return self.conversation.recent_messages
+
+    @property
+    def current_question(self) -> Optional[CurrentQuestion]:
+        return self.current_state.current_question
+
+    @property
+    def interrupted_question(self) -> Optional[CurrentQuestion]:
+        return self.current_state.interrupted_question
+
+    @property
+    def teacher_intervention(self) -> Optional[TeacherIntervention]:
+        return self.current_state.teacher_intervention or self.learning_context.teacher_intervention
+
+    @property
+    def document_context(self) -> Any:
+        from backend.app.ai.rag.models import parse_document_source_context
+        return parse_document_source_context(self.source_context)
+
+    @property
+    def all_document_chunks(self) -> Optional[List[Any]]:
+        return self.document_chunks
