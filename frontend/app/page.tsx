@@ -1,0 +1,162 @@
+"use client";
+
+import React from "react";
+import Link from "next/link";
+import { motion } from "framer-motion";
+import { ArrowRight, BookOpen, Brain, Sparkles } from "lucide-react";
+import dynamic from "next/dynamic";
+import { CurioNav } from "@/components/curio/CurioNav";
+import { KeycapButton } from "@/components/curio/KeycapButton";
+import { useSettingsStore } from "@/stores/settingsStore";
+
+const Hero3DScene = dynamic(
+  () => import("@/components/curio/landing/Hero3DScene").then((mod) => mod.Hero3DScene),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-[400px] flex items-center justify-center bg-sand/30 dark:bg-navy/30 border border-navy/10 dark:border-white/10 rounded-2xl animate-pulse">
+        <span className="font-mono text-xs text-navy/40 dark:text-cream/40 uppercase tracking-widest">
+          Loading 3D Visualizer...
+        </span>
+      </div>
+    ),
+  }
+);
+import { HowCurioThinks } from "@/components/curio/landing/HowCurioThinks";
+import { LearningParadox3D } from "@/components/curio/landing/LearningParadox3D";
+import { TypewriterHeadline } from "@/components/curio/landing/TypewriterHeadline";
+import { AdaptiveNetworkSection } from "@/components/curio/landing/AdaptiveNetworkSection";
+import { TeacherModeDemo } from "@/components/curio/landing/TeacherModeDemo";
+import { ReportPreviewSection } from "@/components/curio/landing/ReportPreviewSection";
+import { DiagonalSweepTransition } from "@/components/curio/DiagonalSweepTransition";
+import { CurioFooter } from "@/components/curio/CurioFooter";
+import { ScrollJourneyLayer } from "@/components/curio/journey/ScrollJourneyLayer";
+import { useAuthStore } from "@/stores/authStore";
+
+export default function LandingPage() {
+  const { isAuthenticated } = useAuthStore();
+  const { initSettings } = useSettingsStore();
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    initSettings();
+    setMounted(true);
+  }, [initSettings]);
+
+  const ctaDestination = mounted && isAuthenticated ? "/dashboard" : "/register";
+
+  const scrollToHowItWorks = () => {
+    document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  return (
+    <div className="min-h-screen bg-transparent text-navy dark:text-[#F0F4F8] flex flex-col selection:bg-cobalt selection:text-white relative">
+      <ScrollJourneyLayer />
+      <DiagonalSweepTransition />
+      <CurioNav activeRoute="home" showProfile={false} />
+
+      {/* 1. HERO SECTION */}
+      <section id="hero-section" className="relative w-full max-w-7xl mx-auto px-6 pt-10 pb-16 md:pt-16 md:pb-24">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+          {/* Left Column: Headline, Subtext, CTAs */}
+          <div className="lg:col-span-6 flex flex-col items-start z-10">
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3 }}
+              className="font-mono text-xs uppercase tracking-widest text-navy/60 dark:text-[#829AB1] font-bold mb-4 flex items-center gap-2"
+            >
+              <span className="w-2 h-2 rounded-full bg-cobalt inline-block animate-pulse" />
+              THE FEYNMAN TECHNIQUE, AUTOMATED
+            </motion.div>
+
+            {/* Headline with Typewriter Animation */}
+            <TypewriterHeadline />
+
+            {/* Subtext */}
+            <motion.p
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4, delay: 0.35 }}
+              className="font-sans text-lg md:text-xl text-navy/80 dark:text-[#BAC7D5] leading-relaxed max-w-xl mb-8"
+            >
+              Explain what you know. Curio challenges your thinking, uncovers your knowledge gaps, and helps you truly understand.
+            </motion.p>
+
+            {/* CTAs */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.4, delay: 0.5 }}
+              className="flex items-center gap-4 flex-wrap"
+            >
+              <Link href={ctaDestination}>
+                <KeycapButton variant="navy" size="lg">
+                  START LEARNING →
+                </KeycapButton>
+              </Link>
+              <KeycapButton
+                variant="ghost-orange"
+                size="lg"
+                onClick={scrollToHowItWorks}
+              >
+                EXPLORE HOW CURIO WORKS ↓
+              </KeycapButton>
+            </motion.div>
+          </div>
+
+          {/* Right Column: 3D Knowledge Network Scene */}
+          <div className="lg:col-span-6 w-full flex justify-center overflow-visible">
+            <Hero3DScene />
+          </div>
+        </div>
+      </section>
+
+      {/* 2. THE PROBLEM VS CURIO */}
+      <LearningParadox3D />
+
+      {/* 3. HOW CURIO THINKS (5-Stage Loop) */}
+      <div id="how-curio-thinks">
+        <HowCurioThinks />
+      </div>
+
+      {/* 4. ADAPTIVE NETWORK TOPOLOGY */}
+      <div id="adaptive-network">
+        <AdaptiveNetworkSection />
+      </div>
+
+      {/* 5. TEACHER MODE INTERACTIVE DEMO */}
+      <div id="teacher-mode-demo">
+        <TeacherModeDemo />
+      </div>
+
+      {/* 6. LEARNING REPORT & GAP MAP */}
+      <div id="report-preview">
+        <ReportPreviewSection />
+      </div>
+
+      {/* 7. FINAL CTA */}
+      <section id="final-cta" className="py-24 border-t border-navy dark:border-[#1E3652] bg-white dark:bg-[#070D18] text-center">
+        <div className="max-w-3xl mx-auto px-6">
+          <span className="font-mono text-xs font-bold uppercase tracking-widest text-cobalt block mb-3">
+            START YOUR LABORATORY
+          </span>
+          <h2 className="font-heading text-4xl sm:text-5xl font-extrabold text-navy dark:text-[#F0F4F8] tracking-tight mb-6">
+            Explain something you know.
+          </h2>
+          <p className="font-sans text-lg text-navy/75 dark:text-[#BAC7D5] max-w-xl mx-auto mb-8">
+            Pick any algorithm, physical process, or architectural concept. Discover what you truly understand.
+          </p>
+          <Link href={ctaDestination}>
+            <KeycapButton variant="navy" size="lg">
+              START WITH CURIO →
+            </KeycapButton>
+          </Link>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <CurioFooter />
+    </div>
+  );
+}

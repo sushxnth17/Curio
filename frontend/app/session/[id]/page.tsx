@@ -1,0 +1,237 @@
+"use client";
+
+import React, { useEffect, useState } from "react";
+import Link from "next/link";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { Menu, BookOpen, ChevronLeft, FileText, ArrowLeft, Mic, LayoutDashboard } from "lucide-react";
+import { useSessionStore } from "@/stores/sessionStore";
+import { useSessionWebSocket } from "@/hooks/useSessionWebSocket";
+import { SessionSidebar } from "@/components/curio/session/SessionSidebar";
+import { ChatThread } from "@/components/curio/session/ChatThread";
+import { InputArea } from "@/components/curio/session/InputArea";
+import { StatusBar } from "@/components/curio/StatusBar";
+import { EvaluatingOverlay } from "@/components/curio/session/EvaluatingOverlay";
+import { FinishDialog } from "@/components/curio/session/FinishDialog";
+import { DocumentContextPanel } from "@/components/curio/session/DocumentContextPanel";
+import { DiagonalSweepTransition } from "@/components/curio/DiagonalSweepTransition";
+import { KeycapButton } from "@/components/curio/KeycapButton";
+import { ProtectedRoute } from "@/components/curio/auth/ProtectedRoute";
+import { speechService } from "@/services/speechService";
+
+export default function LearningSessionPage() {
+  const params = useParams();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const sessionId = (params?.id as string) || "session_default";
+  const topicParam = searchParams?.get("topic") || undefined;
+
+  const {
+    topicName,
+    mode,
+    messages,
+    isThinking,
+    currentTurnNumber,
+    confidence,
+    activeGap,
+    documentId,
+    detachDocument,
+    initSession,
+  } = useSessionStore();
+
+  const { sendMessage, triggerStuck, triggerEndSession } =
+    useSessionWebSocket(sessionId);
+
+  const [finishDialogOpen, setFinishDialogOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [docPanelOpen, setDocPanelOpen] = useState(true);
+
+  useEffect(() => {
+    initSession(sessionId, topicParam);
+    return () => {
+      speechService.stop();
+    };
+  }, [sessionId, topicParam, initSession]);
+
+  const handleConfirmEnd = () => {
+    setFinishDialogOpen(false);
+    triggerEndSession();
+  };
+
+  const isEvaluating = mode === "EVALUATING";
+
+  return (
+    <ProtectedRoute>
+      <div className="h-screen flex bg-ice text-navy overflow-hidden select-none selection:bg-cobalt selection:text-white">
+      <DiagonalSweepTransition />
+
+      {/* Collapsible Session Sidebar */}
+      <SessionSidebar
+        activeSessionId={sessionId}
+        isCollapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+        mobileOpen={mobileSidebarOpen}
+        onMobileClose={() => setMobileSidebarOpen(false)}
+      />
+
+      {/* Central Learning Workspace */}
+      <main className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-ice relative">
+        {/* Top Header */}
+        <header className="w-full bg-white dark:bg-[#080F1A] border-b border-fog dark:border-[#1E3652] px-4 md:px-6 py-3 flex items-center justify-between z-30 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Mobile menu trigger */}
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="p-1.5 text-navy/70 dark:text-[#F0F4F8]/70 hover:text-navy dark:hover:text-white md:hidden"
+              aria-label="Open sessions sidebar"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+
+            {/* Quick Link to Dashboard */}
+            <Link
+              href="/dashboard"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2 py-1 rounded-[3px] font-mono text-xs font-semibold text-navy/70 dark:text-[#F0F4F8]/70 hover:text-navy dark:hover:text-white hover:bg-ice dark:hover:bg-[#101F33] transition-colors border border-fog/60 dark:border-[#1E3652] shrink-0"
+              title="Return to Dashboard"
+            >
+              <LayoutDashboard className="w-3.5 h-3.5 text-cobalt" />
+              <span>DASHBOARD</span>
+            </Link>
+            <span className="text-fog dark:text-[#1E3652] hidden sm:inline">/</span>
+
+            <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-navy/40 dark:text-[#F0F4F8]/40 hidden sm:inline">
+              TOPIC:
+            </span>
+            <h2 className="font-heading text-sm md:text-base font-bold text-navy dark:text-[#F0F4F8] truncate">
+              {topicName || "Learning Session"}
+            </h2>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            {/* Grounding Status Indicator / Panel Toggle */}
+            {documentId && (
+              <button
+                onClick={() => setDocPanelOpen((prev) => !prev)}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors cursor-pointer"
+                title="Toggle document context panel"
+              >
+                <FileText className="w-3 h-3 text-emerald-700 dark:text-emerald-400" />
+                <span className="hidden md:inline">Document Grounded</span>
+              </button>
+            )}
+
+            {/* Mode status indicator */}
+            {mode === "STUDENT" && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-cobalt/10 dark:bg-cobalt/20 text-cobalt border border-cobalt/20 dark:border-cobalt/30">
+                <span className="w-2 h-2 rounded-full bg-cobalt animate-pulse" />
+                <span className="hidden sm:inline">Student Mode</span>
+              </span>
+            )}
+            {mode === "TEACHER" && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-gap-orange/10 dark:bg-gap-orange/20 text-gap-orange border border-gap-orange/30 dark:border-gap-orange/40">
+                <span className="text-xs">◆</span>
+                <span className="hidden sm:inline">Teacher Mode</span>
+              </span>
+            )}
+            {mode === "EVALUATING" && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-navy dark:bg-cobalt text-white">
+                <span className="animate-spin text-xs">◈</span>
+                <span className="hidden sm:inline">Evaluating</span>
+              </span>
+            )}
+
+            {/* Quick Access to Gap Report */}
+            <Link
+              href={`/session/${sessionId}/report`}
+              className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-ice hover:bg-white text-navy/80 border border-fog transition-colors"
+              title="View Real-Time Gap Analysis Report"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-cobalt" />
+              <span>GAP REPORT</span>
+            </Link>
+
+            {/* Quick Audio Practice */}
+            <Link
+              href="/audio-learning"
+              className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-xs font-semibold bg-gap-orange/10 hover:bg-gap-orange/20 text-gap-orange border border-gap-orange/30 transition-colors"
+              title="Practice with Voice Characters"
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span>AUDIO</span>
+            </Link>
+
+            <KeycapButton
+              variant="ghost"
+              size="sm"
+              onClick={() => setFinishDialogOpen(true)}
+              className="text-[11px]"
+            >
+              END SESSION
+            </KeycapButton>
+          </div>
+        </header>
+
+        {/* Chat Thread */}
+        <div
+          className={`flex-1 overflow-hidden flex flex-col transition-opacity duration-300 ${
+            isEvaluating ? "opacity-40 pointer-events-none" : "opacity-100"
+          }`}
+        >
+          <ChatThread
+            messages={messages}
+            isThinking={isThinking}
+            activeGap={activeGap}
+          />
+        </div>
+
+        {/* Subtle Status Bar */}
+        <div className="shrink-0 z-20">
+          <StatusBar
+            mode={mode}
+            turnNumber={currentTurnNumber}
+            confidence={confidence}
+            activeGapTitle={activeGap?.title}
+            onStuckClick={triggerStuck}
+          />
+        </div>
+
+        {/* Pinned Message Composer */}
+        <div
+          className={`shrink-0 z-20 bg-ice transition-opacity duration-300 ${
+            isEvaluating ? "opacity-40 pointer-events-none" : "opacity-100"
+          }`}
+        >
+          <InputArea
+            mode={mode}
+            onSendMessage={sendMessage}
+            onStuck={triggerStuck}
+            onFinishSession={() => setFinishDialogOpen(true)}
+            onAttachmentClick={() => setDocPanelOpen((prev) => !prev)}
+            disabled={isEvaluating}
+          />
+        </div>
+
+        {/* Evaluating Overlay */}
+        {isEvaluating && <EvaluatingOverlay turnCount={currentTurnNumber} />}
+
+        {/* Finish Session Confirm Dialog */}
+        <FinishDialog
+          isOpen={finishDialogOpen}
+          onCancel={() => setFinishDialogOpen(false)}
+          onConfirm={handleConfirmEnd}
+        />
+      </main>
+
+      {/* Document Grounding Context Panel */}
+      {documentId && (
+        <DocumentContextPanel
+          documentId={documentId}
+          isOpen={docPanelOpen}
+          onToggle={() => setDocPanelOpen((prev) => !prev)}
+          onDeselect={detachDocument}
+        />
+      )}
+    </div>
+    </ProtectedRoute>
+  );
+}

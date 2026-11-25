@@ -1,0 +1,352 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-heading: var(--font-sora);
+    --font-body: var(--font-dm-sans);
+    --font-mono: var(--font-mono);
+    --font-ibm-plex-mono: var(--font-mono);
+
+    --ice: #E8EEF3;
+    --navy: #0F2B4A;
+    --cobalt: #3A63FF;
+    --gap-orange: #FF6B1A;
+    --fog: #C4CDD6;
+    --chalk: #FFFFFF;
+
+    --background: 208 26% 93%; /* #E8EEF3 */
+    --foreground: 211 66% 17%; /* #0F2B4A */
+    --card: 0 0% 100%;
+    --card-foreground: 211 66% 17%;
+    --border: 212 18% 81%; /* #C4CDD6 */
+    --primary: 211 66% 17%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 227 100% 62%; /* #3A63FF */
+    --accent-foreground: 0 0% 100%;
+    --warning: 22 100% 55%; /* #FF6B1A */
+    --warning-foreground: 0 0% 100%;
+  }
+
+  .dark {
+    --ice: #080F1A;
+    --navy: #F0F4F8;
+    --cobalt: #4D76FF;
+    --gap-orange: #FF7B33;
+    --fog: #1E3652;
+    --chalk: #101F33;
+
+    --background: 216 58% 7%;
+    --foreground: 210 33% 96%;
+    --card: 216 48% 12%;
+    --card-foreground: 210 33% 96%;
+    --border: 214 36% 22%;
+    --primary: 210 33% 96%;
+    --primary-foreground: 216 58% 7%;
+    --accent: 227 100% 65%;
+    --accent-foreground: 0 0% 100%;
+    --warning: 22 100% 58%;
+    --warning-foreground: 0 0% 100%;
+  }
+
+  * {
+    border-color: #C4CDD6;
+  }
+
+  body {
+    background-color: #E8EEF3;
+    color: #0F2B4A;
+    font-family: var(--font-dm-sans), sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-sora), sans-serif;
+  }
+
+  code, pre, kbd, samp {
+    font-family: var(--font-mono), monospace;
+  }
+
+  :focus-visible {
+    outline: 2px solid #3A63FF;
+    outline-offset: 2px;
+  }
+}
+
+/* Gap Hatching Pattern */
+.bg-gap-hatch {
+  background: repeating-linear-gradient(
+    -45deg,
+    #FF6B1A 0px, #FF6B1A 2px,
+    transparent 2px, transparent 8px
+  );
+}
+
+.border-gap-hatch {
+  border: 1.5px solid #FF6B1A;
+  background-origin: border-box;
+}
+
+/* Pulsing ring for gap focus */
+@keyframes gap-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 107, 26, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 107, 26, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 107, 26, 0);
+  }
+}
+
+.animate-gap-pulse {
+  animation: gap-pulse-ring 1.8s infinite cubic-bezier(0.66, 0, 0, 1);
+}
+
+/* Editorial Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #E8EEF3;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C4CDD6;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #0F2B4A;
+}
+
+/* Animated Character Breathing & Float */
+@keyframes character-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes pulse-gentle {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+}
+
+.animate-float {
+  animation: character-float 4s ease-in-out infinite;
+}
+
+.animate-pulse-gentle {
+  animation: pulse-gentle 2s ease-in-out infinite;
+}
+
+
+/* Accessibility: Non-essential UI transitions can respect reduced motion while preserving interactive characters */
+@media (prefers-reduced-motion: reduce) {
+  .motion-reduce-safe {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ========================================================
+   CURIO DARK MODE THEME SYSTEM
+   Preserves 100% of the light editorial theme while providing
+   a stunning blueprint / obsidian dark mode when active.
+   ======================================================== */
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark body {
+  background-color: #080F1A !important;
+  color: #F0F4F8 !important;
+}
+
+/* Background overrides in dark mode */
+html.dark .bg-ice {
+  background-color: #080F1A !important;
+}
+html.dark .bg-ice\/30,
+html.dark .bg-ice\/40,
+html.dark .bg-ice\/50,
+html.dark .bg-ice\/60,
+html.dark .bg-ice\/70,
+html.dark .bg-ice\/80 {
+  background-color: rgba(16, 31, 51, 0.75) !important;
+}
+
+html.dark .bg-white {
+  background-color: #101F33 !important;
+}
+html.dark .bg-white\/60,
+html.dark .bg-white\/70,
+html.dark .bg-white\/80,
+html.dark .bg-white\/85,
+html.dark .bg-white\/90,
+html.dark .bg-white\/95 {
+  background-color: rgba(16, 31, 51, 0.95) !important;
+}
+
+html.dark .bg-chalk {
+  background-color: #101F33 !important;
+}
+
+/* Text overrides in dark mode */
+html.dark .text-navy {
+  color: #F0F4F8 !important;
+}
+html.dark .text-navy\/95,
+html.dark .text-navy\/90 {
+  color: rgba(240, 244, 248, 0.92) !important;
+}
+html.dark .text-navy\/85 {
+  color: rgba(240, 244, 248, 0.88) !important;
+}
+html.dark .text-navy\/80 {
+  color: rgba(240, 244, 248, 0.82) !important;
+}
+html.dark .text-navy\/75 {
+  color: rgba(240, 244, 248, 0.78) !important;
+}
+html.dark .text-navy\/70 {
+  color: rgba(240, 244, 248, 0.72) !important;
+}
+html.dark .text-navy\/60 {
+  color: rgba(240, 244, 248, 0.62) !important;
+}
+html.dark .text-navy\/50 {
+  color: rgba(240, 244, 248, 0.52) !important;
+}
+html.dark .text-navy\/40 {
+  color: rgba(240, 244, 248, 0.42) !important;
+}
+html.dark .text-navy\/35,
+html.dark .text-navy\/30 {
+  color: rgba(240, 244, 248, 0.35) !important;
+}
+
+/* Form Inputs, Textarea, Select, and Placeholders */
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark textarea,
+html.dark select {
+  background-color: #101F33;
+  color: #F0F4F8;
+  border-color: #1E3652;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #627D98 !important;
+  opacity: 1 !important;
+}
+
+html.dark input.bg-transparent,
+html.dark textarea.bg-transparent {
+  background-color: transparent !important;
+}
+
+/* Status Cards & Alert Backgrounds in dark mode */
+html.dark .bg-\[\#FFF8F5\],
+html.dark .bg-\[\#FFF5EE\],
+html.dark .bg-amber-50,
+html.dark .bg-amber-50\/80 {
+  background-color: #211510 !important;
+  border-color: rgba(255, 107, 26, 0.4) !important;
+}
+
+html.dark .bg-rose-50,
+html.dark .bg-rose-50\/80,
+html.dark .bg-rose-50\/90 {
+  background-color: #2A1017 !important;
+  border-color: rgba(244, 63, 94, 0.4) !important;
+}
+
+html.dark .bg-emerald-50,
+html.dark .bg-emerald-50\/80 {
+  background-color: #0B241A !important;
+  border-color: rgba(16, 185, 129, 0.4) !important;
+}
+
+html.dark .bg-blue-50,
+html.dark .bg-cyan-50,
+html.dark .bg-slate-50 {
+  background-color: #0E1A2B !important;
+  border-color: #1E3652 !important;
+}
+
+/* Border overrides in dark mode */
+html.dark .border-fog {
+  border-color: #1E3652 !important;
+}
+html.dark .border-fog\/50,
+html.dark .border-fog\/60,
+html.dark .border-fog\/80 {
+  border-color: rgba(30, 54, 82, 0.75) !important;
+}
+html.dark .border-navy {
+  border-color: #2F4D73 !important;
+}
+
+/* Hover overrides in dark mode */
+html.dark .hover\:bg-ice:hover {
+  background-color: #142842 !important;
+}
+html.dark .hover\:bg-white:hover {
+  background-color: #162B47 !important;
+}
+html.dark .hover\:bg-navy:hover {
+  background-color: #3A63FF !important;
+  color: #FFFFFF !important;
+}
+html.dark .hover\:text-navy:hover {
+  color: #FFFFFF !important;
+}
+
+/* Keycaps & Editorial shadows */
+html.dark .shadow-keycap {
+  box-shadow: 0 4px 0 0 #040910, 0 6px 12px rgba(0, 0, 0, 0.5) !important;
+}
+html.dark .shadow-editorial {
+  box-shadow: 4px 4px 0 0 #040910 !important;
+}
+html.dark .shadow-editorial-lg {
+  box-shadow: 8px 8px 0 0 #040910 !important;
+}
+
+html.dark .shadow-\[0_4px_0_0_\#0F2B4A\],
+html.dark .shadow-\[0_2px_0_0_\#0F2B4A\],
+html.dark .shadow-\[1px_1px_0_0_\#0F2B4A\],
+html.dark .shadow-\[2px_2px_0_0_\#0F2B4A\],
+html.dark .shadow-\[3px_3px_0_0_\#0F2B4A\],
+html.dark .shadow-\[4px_4px_0_0_\#0F2B4A\],
+html.dark .shadow-\[6px_6px_0_0_\#0F2B4A\],
+html.dark .shadow-\[8px_8px_0_0_\#0F2B4A\] {
+  box-shadow: 3px 3px 0 0 #040910 !important;
+}
+
+/* Custom Scrollbars in dark */
+html.dark ::-webkit-scrollbar-track {
+  background: #080F1A;
+}
+html.dark ::-webkit-scrollbar-thumb {
+  background: #1E3652;
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #3A63FF;
+}
+
+

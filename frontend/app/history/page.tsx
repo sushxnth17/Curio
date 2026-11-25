@@ -1,0 +1,237 @@
+"use client";
+
+import React, { useState, useEffect } from "react";
+import Link from "next/link";
+import { ArrowLeft, BookOpen, Layers, Sparkles, FileText } from "lucide-react";
+import { ProtectedRoute } from "@/components/curio/auth/ProtectedRoute";
+import { CurioNav } from "@/components/curio/CurioNav";
+import { KeycapButton } from "@/components/curio/KeycapButton";
+import { DiagonalSweepTransition } from "@/components/curio/DiagonalSweepTransition";
+import { SessionFilter, HistoryFilterType } from "@/components/curio/history/SessionFilter";
+import { SessionCard } from "@/components/curio/history/SessionCard";
+import { ReportCard } from "@/components/curio/history/ReportCard";
+import { PracticeQueueCard } from "@/components/curio/history/PracticeQueueCard";
+import { getSessionHistory, getPracticeQueue, getUserGapReports } from "@/services/historyService";
+import { SessionSummary, PracticeQueueItem, UserReportHistoryItem } from "@/types/history";
+
+export default function SessionHistoryPage() {
+  return (
+    <ProtectedRoute>
+      <SessionHistoryContent />
+    </ProtectedRoute>
+  );
+}
+
+function SessionHistoryContent() {
+  const [filter, setFilter] = useState<HistoryFilterType>("ALL");
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [reports, setReports] = useState<UserReportHistoryItem[]>([]);
+  const [practiceQueue, setPracticeQueue] = useState<PracticeQueueItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([getSessionHistory(), getUserGapReports(), getPracticeQueue()]).then(
+      ([hist, userReports, queue]) => {
+        if (mounted) {
+          setSessions(hist);
+          setReports(userReports);
+          setPracticeQueue(queue);
+          setLoading(false);
+        }
+      }
+    );
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const filteredSessions = sessions.filter((s) => {
+    if (filter === "ALL") return true;
+    if (filter === "IN_PROGRESS") return s.status === "IN_PROGRESS";
+    if (filter === "COMPLETED") return s.status === "COMPLETED";
+    return false;
+  });
+
+  return (
+    <div className="min-h-screen bg-ice dark:bg-[#070D18] text-navy dark:text-[#F0F4F8] flex flex-col selection:bg-cobalt selection:text-white">
+      <DiagonalSweepTransition />
+
+      {/* Global Navigation */}
+      <CurioNav activeRoute="history" />
+
+      {/* Sub-bar with Breadcrumb & Quick Actions */}
+      <div className="w-full bg-white/70 dark:bg-[#0B1524]/90 border-b border-fog/80 dark:border-[#1E3652] px-6 py-2.5">
+        <div className="max-w-4xl mx-auto flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2 text-navy/60 dark:text-[#829AB1]">
+            <Link href="/dashboard" className="hover:text-navy dark:hover:text-white transition-colors">
+              DASHBOARD
+            </Link>
+            <span className="text-fog dark:text-[#2F4D73]">/</span>
+            <span className="font-bold text-navy dark:text-[#F0F4F8]">LEARNING HISTORY</span>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <Link
+              href="/audio-learning"
+              className="hidden sm:inline-flex items-center gap-1.5 text-gap-orange hover:text-gap-orange/80 font-bold transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>AUDIO PRACTICE</span>
+            </Link>
+            <Link href="/topics">
+              <KeycapButton variant="navy" size="sm">
+                NEW SESSION +
+              </KeycapButton>
+            </Link>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <main className="flex-1 max-w-4xl mx-auto w-full px-6 py-10">
+        <div className="mb-6">
+          <h1 className="font-heading text-2xl md:text-3xl font-extrabold text-navy dark:text-[#F0F4F8] tracking-tight mb-2">
+            Your Learning History
+          </h1>
+          <p className="font-sans text-sm text-navy/70 dark:text-[#BAC7D5]">
+            Review your past explanations, track concept mastery, inspect generated Gap Reports, and export downloadable PDFs.
+          </p>
+        </div>
+
+        {/* Filter Strip */}
+        <SessionFilter
+          activeFilter={filter}
+          onFilterChange={setFilter}
+          reportsCount={reports.length}
+          practiceQueueCount={practiceQueue.length}
+        />
+
+        {/* Content List */}
+        {loading ? (
+          <div className="py-20 text-center font-mono text-xs uppercase tracking-widest text-navy/50 dark:text-[#829AB1] flex items-center justify-center gap-2">
+            <span className="w-4 h-4 border-2 border-cobalt border-t-transparent rounded-full animate-spin" />
+            LOADING SESSIONS & REPORTS...
+          </div>
+        ) : filter === "REPORTS" ? (
+          /* Dedicated Gap Reports History View */
+          reports.length > 0 ? (
+            <div className="space-y-4">
+              {reports.map((report) => (
+                <ReportCard key={report.id} report={report} />
+              ))}
+            </div>
+          ) : (
+            <div className="bg-white dark:bg-[#0E1A2B] border border-fog dark:border-[#1E3652] rounded-[8px] p-12 text-center shadow-xs">
+              <FileText className="w-8 h-8 text-gap-orange mx-auto mb-3 opacity-60" />
+              <h3 className="font-heading text-lg font-bold text-navy dark:text-[#F0F4F8] mb-2">
+                No Gap Reports Generated Yet
+              </h3>
+              <p className="font-sans text-sm text-navy/60 dark:text-[#BAC7D5] max-w-md mx-auto mb-6">
+                When you complete an explanation session with Curio, a comprehensive Feynman Gap Report is automatically synthesized and saved here for review and PDF export.
+              </p>
+              <Link href="/topics">
+                <KeycapButton variant="navy" size="md">
+                  START A LEARNING SESSION →
+                </KeycapButton>
+              </Link>
+            </div>
+          )
+        ) : filter === "PRACTICE_QUEUE" ? (
+          /* Practice Queue View */
+          practiceQueue.length > 0 ? (
+            <div className="space-y-4">
+              {practiceQueue.map((item) => (
+                <PracticeQueueCard key={item.id} item={item} />
+              ))}
+            </div>
+          ) : (
+            <div className="bg-white dark:bg-[#0E1A2B] border border-fog dark:border-[#1E3652] rounded-[8px] p-12 text-center shadow-xs">
+              <h3 className="font-heading text-lg font-bold text-navy dark:text-[#F0F4F8] mb-2">
+                Practice Queue Empty
+              </h3>
+              <p className="font-sans text-sm text-navy/60 dark:text-[#BAC7D5] max-w-md mx-auto mb-6">
+                You have no gaps saved for later. When exploring a Gap Report, click &quot;Save for Later&quot; to queue specific concepts for targeted practice.
+              </p>
+              <Link href="/topics">
+                <KeycapButton variant="navy" size="md">
+                  START LEARNING A TOPIC →
+                </KeycapButton>
+              </Link>
+            </div>
+          )
+        ) : filter === "ALL" ? (
+          /* ALL View: Displays both Gap Reports (if any exist) and Chat Sessions */
+          <div className="space-y-8">
+            {reports.length > 0 && (
+              <section>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs uppercase font-bold tracking-wider text-gap-orange">
+                      PERSISTED GAP REPORTS ({reports.length})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFilter("REPORTS")}
+                    className="font-mono text-xs font-semibold text-cobalt hover:underline"
+                  >
+                    VIEW ALL REPORTS →
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  {reports.slice(0, 3).map((report) => (
+                    <ReportCard key={report.id} report={report} />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-mono text-xs uppercase font-bold tracking-wider text-navy/60 dark:text-[#829AB1]">
+                  CHAT SESSIONS ({sessions.length})
+                </span>
+              </div>
+              {filteredSessions.length > 0 ? (
+                <div className="space-y-4">
+                  {filteredSessions.map((session) => (
+                    <SessionCard key={session.sessionId} session={session} />
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-white dark:bg-[#0E1A2B] border border-fog dark:border-[#1E3652] rounded-[8px] p-8 text-center shadow-xs">
+                  <p className="font-sans text-sm text-navy/60 dark:text-[#BAC7D5]">
+                    No chat sessions recorded yet.
+                  </p>
+                </div>
+              )}
+            </section>
+          </div>
+        ) : filteredSessions.length > 0 ? (
+          /* Filtered Sessions List View (IN_PROGRESS / COMPLETED) */
+          <div className="space-y-4">
+            {filteredSessions.map((session) => (
+              <SessionCard key={session.sessionId} session={session} />
+            ))}
+          </div>
+        ) : (
+          /* Empty State */
+          <div className="bg-white dark:bg-[#0E1A2B] border border-fog dark:border-[#1E3652] rounded-[8px] p-12 text-center shadow-xs">
+            <h3 className="font-heading text-lg font-bold text-navy dark:text-[#F0F4F8] mb-2">
+              No sessions found
+            </h3>
+            <p className="font-sans text-sm text-navy/60 dark:text-[#BAC7D5] max-w-md mx-auto mb-6">
+              You haven&apos;t recorded any sessions under this filter yet. Teach Curio any concept to identify your understanding gaps.
+            </p>
+            <Link href="/topics">
+              <KeycapButton variant="navy" size="md">
+                START FIRST SESSION →
+              </KeycapButton>
+            </Link>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
